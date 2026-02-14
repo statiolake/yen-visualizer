@@ -1,0 +1,151 @@
+:root {
+  --bg-a: #121212;
+  --bg-b: #1f2f25;
+  --panel-bg: rgba(248, 249, 243, 0.95);
+  --ink: #1a1f1b;
+  --accent: #176b39;
+  --accent-ink: #f4fbf6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: "Hiragino Sans", "Yu Gothic", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 12% 10%, #385540 0%, transparent 38%),
+    radial-gradient(circle at 88% 88%, #453c2a 0%, transparent 34%),
+    linear-gradient(135deg, var(--bg-a), var(--bg-b));
+}
+
+.app {
+  min-height: 100vh;
+  padding: 20px;
+  display: grid;
+  gap: 14px;
+  grid-template-rows: auto 1fr;
+}
+
+.panel {
+  width: min(980px, 100%);
+  margin: 0 auto;
+  background: var(--panel-bg);
+  border: 1px solid rgba(23, 107, 57, 0.2);
+  border-radius: 16px;
+  padding: 16px;
+  backdrop-filter: blur(4px);
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.35rem, 1.8vw, 1.85rem);
+}
+
+.lead {
+  margin: 8px 0 14px;
+  font-size: 0.95rem;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+label {
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+input {
+  width: 180px;
+  max-width: 100%;
+  border-radius: 10px;
+  border: 1px solid rgba(26, 31, 27, 0.2);
+  background: #fff;
+  color: var(--ink);
+  padding: 10px;
+  font-size: 1rem;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+button#clearButton {
+  background: #424a45;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.status,
+.hint {
+  margin: 10px 0 0;
+  font-size: 0.9rem;
+}
+
+.viewport-wrap {
+  min-height: 0;
+}
+
+.viewport {
+  width: min(980px, 100%);
+  height: min(68vh, 760px);
+  margin: 0 auto;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  background:
+    radial-gradient(circle at 55% 25%, #2b4436, #14231a 78%);
+}
+
+canvas {
+  display: block;
+}
+
+@media (max-width: 640px) {
+  .app {
+    padding: 12px;
+  }
+
+  .panel {
+    padding: 12px;
+    border-radius: 12px;
+  }
+
+  .controls {
+    align-items: stretch;
+  }
+
+  input,
+  button {
+    width: 100%;
+  }
+
+  .viewport {
+    height: 62vh;
+    border-radius: 12px;
+  }
+}
