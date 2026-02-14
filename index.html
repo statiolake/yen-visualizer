@@ -17,33 +17,21 @@
   </head>
   <body>
     <main class="app">
-      <section class="panel">
-        <h1>Yen Visualizer</h1>
-        <p class="lead">
-          入力金額を札として上から降らせ、現金の山として表示します。
-        </p>
+      <div id="viewport" class="viewport" aria-label="現金の3D表示"></div>
 
-        <div class="controls">
-          <label for="amountInput">金額 (円)</label>
-          <input
-            id="amountInput"
-            type="number"
-            min="0"
-            step="100"
-            value="50000"
-            inputmode="numeric"
-          />
-          <button id="dropButton" type="button">現金を降らせる</button>
-          <button id="clearButton" type="button">リセット</button>
-        </div>
-
-        <p id="statusLine" class="status">待機中</p>
-        <p id="hintLine" class="hint"></p>
-      </section>
-
-      <section class="viewport-wrap">
-        <div id="viewport" class="viewport" aria-label="現金の3D表示"></div>
-      </section>
+      <form id="visualizeForm" class="overlay-controls">
+        <input
+          id="amountInput"
+          type="number"
+          min="1"
+          step="1"
+          value="50000"
+          inputmode="numeric"
+          aria-label="金額（円）"
+          required
+        />
+        <button id="dropButton" type="submit">を可視化</button>
+      </form>
     </main>
 
     <script type="module" src="./app.js"></script>

@@ -3,9 +3,7 @@ import * as CANNON from "cannon-es";
 
 const amountInput = document.querySelector("#amountInput");
 const dropButton = document.querySelector("#dropButton");
-const clearButton = document.querySelector("#clearButton");
-const statusLine = document.querySelector("#statusLine");
-const hintLine = document.querySelector("#hintLine");
+const visualizeForm = document.querySelector("#visualizeForm");
 const viewport = document.querySelector("#viewport");
 
 const IMAGE_DIR = "./money_images";
@@ -124,7 +122,6 @@ let spawnAccumulator = 0;
 let settleAccumulator = 0;
 let running = false;
 let assetsReady = false;
-let lastQueueMeta = null;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x5f7f6d);
@@ -646,13 +643,17 @@ function parseAmount(raw) {
   };
 }
 
-function updateStatus(text) {
-  statusLine.textContent = text;
+const DEFAULT_BUTTON_LABEL = "を可視化";
+
+function setDropButtonLabel(text) {
+  dropButton.textContent = text;
 }
 
-function queueFromAmount() {
+function queueFromAmount(event) {
+  if (event) {
+    event.preventDefault();
+  }
   if (!assetsReady) {
-    updateStatus("画像を読み込み中です。しばらく待ってください。");
     return;
   }
 
@@ -660,43 +661,21 @@ function queueFromAmount() {
   const parsed = parseAmount(amount);
 
   if (parsed.itemQueue.length <= 0) {
-    updateStatus("1円以上の金額を入力してください。");
-    hintLine.textContent = "";
+    amountInput.reportValidity();
     return;
   }
+
+  clearAll();
 
   pendingQueue.length = 0;
   for (const entry of parsed.itemQueue) {
     pendingQueue.push(entry);
   }
 
-  lastQueueMeta = parsed;
   running = true;
   spawnAccumulator = 0;
   settleAccumulator = 0;
-  dropButton.disabled = true;
-
-  const amountText = new Intl.NumberFormat("ja-JP").format(parsed.original);
-  const itemCountText = new Intl.NumberFormat("ja-JP").format(parsed.itemQueue.length);
-  updateStatus(`${amountText}円を投入: ${itemCountText}個を落下中`);
-
-  const hints = [];
-  if (parsed.bundleSize > 1) {
-    const bundleText = new Intl.NumberFormat("ja-JP").format(parsed.bundleSize);
-    hints.push(`描画負荷対策として1オブジェクトを約${bundleText}個分として圧縮表示しています。`);
-  }
-
-  const details = parsed.denominationCounts
-    .filter((x) => x.count > 0)
-    .slice(0, 4)
-    .map((x) => `${x.denomination.label}×${x.count}`)
-    .join(" / ");
-  if (details) {
-    const more = parsed.denominationCounts.filter((x) => x.count > 0).length > 4 ? " ..." : "";
-    hints.push(`内訳: ${details}${more}`);
-  }
-
-  hintLine.textContent = hints.join(" ");
+  setDropButtonLabel("可視化中...");
 }
 
 function clearAll() {
@@ -710,11 +689,7 @@ function clearAll() {
 
   running = false;
   settleAccumulator = 0;
-  lastQueueMeta = null;
-  dropButton.disabled = !assetsReady;
-
-  updateStatus("リセットしました。");
-  hintLine.textContent = "";
+  setDropButtonLabel(DEFAULT_BUTTON_LABEL);
 }
 
 function isBodySettled(body) {
@@ -750,8 +725,7 @@ function resize() {
   renderer.setSize(width, height);
 }
 
-dropButton.addEventListener("click", queueFromAmount);
-clearButton.addEventListener("click", clearAll);
+visualizeForm.addEventListener("submit", queueFromAmount);
 window.addEventListener("resize", resize);
 resize();
 
@@ -779,16 +753,7 @@ function tick() {
 
     if (settleAccumulator > 0.75) {
       running = false;
-      dropButton.disabled = !assetsReady;
-      const placedText = new Intl.NumberFormat("ja-JP").format(cashObjects.length);
-      const representedText = lastQueueMeta
-        ? new Intl.NumberFormat("ja-JP").format(lastQueueMeta.representedAmount)
-        : null;
-      updateStatus(
-        representedText
-          ? `着地完了: ${placedText}個で約${representedText}円を表示`
-          : `着地完了: ${placedText}個を表示`
-      );
+      setDropButtonLabel(DEFAULT_BUTTON_LABEL);
     }
   }
 
@@ -800,19 +765,18 @@ tick();
 
 async function initAssets() {
   dropButton.disabled = true;
-  updateStatus("画像を読み込み中...");
-  hintLine.textContent = "";
+  setDropButtonLabel("読込中...");
 
   try {
     await preloadTextures();
     assetsReady = true;
     dropButton.disabled = false;
-    updateStatus("待機中");
+    setDropButtonLabel(DEFAULT_BUTTON_LABEL);
   } catch (error) {
     console.error(error);
     assetsReady = false;
     dropButton.disabled = true;
-    updateStatus("画像読み込みに失敗しました。ファイル名を確認してください。");
+    setDropButtonLabel("読込失敗");
   }
 }
 
