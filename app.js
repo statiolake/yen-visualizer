@@ -1,5 +1,4 @@
 import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import * as CANNON from "cannon-es";
 
 const amountInput = document.querySelector("#amountInput");
@@ -15,11 +14,12 @@ const NOTE_DEPTH = 0.68;
 const NOTE_THICKNESS = 0.013;
 const DEFAULT_BILL_ASPECT = NOTE_WIDTH / NOTE_DEPTH;
 const DROP_HEIGHT = 4.25;
-const DROP_RADIUS = 1.7;
+const DROP_RADIUS = 1.45;
 const MAX_VISUAL_ITEMS = 480;
 
-const TABLE_SIZE = 8.8;
-const TABLE_HEIGHT = 0.5;
+const TABLE_RENDER_SIZE = 120;
+const CAMERA_POS = new THREE.Vector3(0, 5.8, 4.9);
+const CAMERA_TARGET = new THREE.Vector3(0, 0.28, 0);
 
 const SPAWN_INTERVAL = 0.04;
 const FIXED_TIMESTEP = 1 / 60;
@@ -130,14 +130,13 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x5f7f6d);
 scene.fog = new THREE.Fog(0x5f7f6d, 7, 20);
 
-const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 100);
-camera.position.set(0, 4.8, 6.3);
+const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 2.0;
+renderer.toneMappingExposure = 1.35;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 viewport.appendChild(renderer.domElement);
@@ -149,17 +148,15 @@ const billGeometryCache = new Map();
 const coinMaterialCache = new Map();
 const coinGeometryCache = new Map();
 
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.target.set(0, 0.7, 0);
-controls.minDistance = 2.8;
-controls.maxDistance = 10.5;
-controls.maxPolarAngle = Math.PI * 0.48;
+function setFixedCamera() {
+  camera.position.copy(CAMERA_POS);
+  camera.lookAt(CAMERA_TARGET);
+}
 
-const hemiLight = new THREE.HemisphereLight(0xffffff, 0x5b6f63, 1.85);
+const hemiLight = new THREE.HemisphereLight(0xffffff, 0x5b6f63, 1.2);
 scene.add(hemiLight);
 
-const dirLight = new THREE.DirectionalLight(0xffffff, 2.2);
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.45);
 dirLight.position.set(4.5, 7.8, 4.5);
 dirLight.castShadow = true;
 dirLight.shadow.mapSize.set(2048, 2048);
@@ -169,35 +166,23 @@ dirLight.shadow.camera.top = 6;
 dirLight.shadow.camera.bottom = -6;
 scene.add(dirLight);
 
-const fillLight = new THREE.DirectionalLight(0xdce8ff, 0.45);
+const fillLight = new THREE.DirectionalLight(0xdce8ff, 0.26);
 fillLight.position.set(-4.2, 5.2, -3.8);
 scene.add(fillLight);
 
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.34);
 scene.add(ambientLight);
 
-const table = new THREE.Mesh(
-  new THREE.BoxGeometry(TABLE_SIZE, TABLE_HEIGHT, TABLE_SIZE),
-  new THREE.MeshStandardMaterial({
-    color: 0x7a6140,
-    roughness: 0.8,
-    metalness: 0.04
-  })
-);
-table.position.y = -TABLE_HEIGHT * 0.5;
-table.receiveShadow = true;
-scene.add(table);
-
 const tableTop = new THREE.Mesh(
-  new THREE.PlaneGeometry(TABLE_SIZE, TABLE_SIZE, 1, 1),
+  new THREE.PlaneGeometry(TABLE_RENDER_SIZE, TABLE_RENDER_SIZE, 1, 1),
   new THREE.MeshStandardMaterial({
-    color: 0x8e7351,
+    color: 0xa9895d,
     roughness: 0.8,
     metalness: 0.02
   })
 );
 tableTop.rotation.x = -Math.PI / 2;
-tableTop.position.y = 0.002;
+tableTop.position.y = 0;
 tableTop.receiveShadow = true;
 scene.add(tableTop);
 
@@ -225,46 +210,12 @@ world.addContactMaterial(
 
 const tableBody = new CANNON.Body({
   mass: 0,
-  material: tableMaterial,
-  shape: new CANNON.Box(new CANNON.Vec3(TABLE_SIZE * 0.5, TABLE_HEIGHT * 0.5, TABLE_SIZE * 0.5))
+  material: tableMaterial
 });
-tableBody.position.set(0, -TABLE_HEIGHT * 0.5, 0);
+tableBody.addShape(new CANNON.Plane());
+tableBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+tableBody.position.set(0, 0, 0);
 world.addBody(tableBody);
-
-function addBoundsWalls() {
-  const wallHeight = 1.4;
-  const wallThickness = 0.16;
-  const half = TABLE_SIZE * 0.5;
-  const y = wallHeight * 0.5;
-
-  const walls = [
-    {
-      shape: new CANNON.Box(new CANNON.Vec3(half, wallHeight * 0.5, wallThickness * 0.5)),
-      pos: [0, y, half + wallThickness * 0.5]
-    },
-    {
-      shape: new CANNON.Box(new CANNON.Vec3(half, wallHeight * 0.5, wallThickness * 0.5)),
-      pos: [0, y, -half - wallThickness * 0.5]
-    },
-    {
-      shape: new CANNON.Box(new CANNON.Vec3(wallThickness * 0.5, wallHeight * 0.5, half)),
-      pos: [half + wallThickness * 0.5, y, 0]
-    },
-    {
-      shape: new CANNON.Box(new CANNON.Vec3(wallThickness * 0.5, wallHeight * 0.5, half)),
-      pos: [-half - wallThickness * 0.5, y, 0]
-    }
-  ];
-
-  for (const wall of walls) {
-    const body = new CANNON.Body({ mass: 0, material: tableMaterial });
-    body.addShape(wall.shape);
-    body.position.set(...wall.pos);
-    world.addBody(body);
-  }
-}
-
-addBoundsWalls();
 
 function makeBillGeometry(width, depth) {
   const geometry = new THREE.BoxGeometry(width, NOTE_THICKNESS, depth, 8, 1, 4);
@@ -794,6 +745,7 @@ function resize() {
   const width = viewport.clientWidth;
   const height = viewport.clientHeight;
   camera.aspect = width / height;
+  setFixedCamera();
   camera.updateProjectionMatrix();
   renderer.setSize(width, height);
 }
@@ -840,7 +792,6 @@ function tick() {
     }
   }
 
-  controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
