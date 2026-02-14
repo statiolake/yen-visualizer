@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import * as CANNON from "cannon-es";
 
 const amountInput = document.querySelector("#amountInput");
 const dropButton = document.querySelector("#dropButton");
@@ -11,15 +12,20 @@ const viewport = document.querySelector("#viewport");
 const IMAGE_DIR = "./money_images";
 const NOTE_WIDTH = 1.5;
 const NOTE_DEPTH = 0.68;
-const NOTE_THICKNESS = 0.032;
+const NOTE_THICKNESS = 0.013;
 const DEFAULT_BILL_ASPECT = NOTE_WIDTH / NOTE_DEPTH;
-const DROP_HEIGHT = 4.2;
-const MAX_VISUAL_ITEMS = 850;
+const DROP_HEIGHT = 4.25;
+const DROP_RADIUS = 1.7;
+const MAX_VISUAL_ITEMS = 480;
 
-const PILE_RADIUS = 1.75;
-const GRID_CELL_SIZE = 0.16;
-const GRID_CELLS = Math.ceil((PILE_RADIUS * 2) / GRID_CELL_SIZE);
-const GRID_HALF = Math.floor(GRID_CELLS / 2);
+const TABLE_SIZE = 8.8;
+const TABLE_HEIGHT = 0.5;
+
+const SPAWN_INTERVAL = 0.04;
+const FIXED_TIMESTEP = 1 / 60;
+const MAX_SUBSTEPS = 6;
+const SETTLE_SPEED_SQ = 0.04;
+const SETTLE_ANGULAR_SPEED_SQ = 0.08;
 
 const DENOMINATIONS = [
   {
@@ -111,19 +117,18 @@ const DENOMINATIONS = [
   }
 ];
 
-const placedCash = [];
-const activeCash = [];
+const cashObjects = [];
 const pendingQueue = [];
-const pileHeightGrid = new Float32Array(GRID_CELLS * GRID_CELLS);
 
 let spawnAccumulator = 0;
+let settleAccumulator = 0;
 let running = false;
-let lastQueueMeta = null;
 let assetsReady = false;
+let lastQueueMeta = null;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x1b2b21);
-scene.fog = new THREE.Fog(0x1b2b21, 3.8, 13);
+scene.background = new THREE.Color(0x5f7f6d);
+scene.fog = new THREE.Fog(0x5f7f6d, 7, 20);
 
 const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 100);
 camera.position.set(0, 4.8, 6.3);
@@ -131,6 +136,8 @@ camera.position.set(0, 4.8, 6.3);
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 2.0;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 viewport.appendChild(renderer.domElement);
@@ -149,10 +156,10 @@ controls.minDistance = 2.8;
 controls.maxDistance = 10.5;
 controls.maxPolarAngle = Math.PI * 0.48;
 
-const hemiLight = new THREE.HemisphereLight(0xf7f8e5, 0x1a221d, 0.95);
+const hemiLight = new THREE.HemisphereLight(0xffffff, 0x5b6f63, 1.85);
 scene.add(hemiLight);
 
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+const dirLight = new THREE.DirectionalLight(0xffffff, 2.2);
 dirLight.position.set(4.5, 7.8, 4.5);
 dirLight.castShadow = true;
 dirLight.shadow.mapSize.set(2048, 2048);
@@ -162,39 +169,114 @@ dirLight.shadow.camera.top = 6;
 dirLight.shadow.camera.bottom = -6;
 scene.add(dirLight);
 
+const fillLight = new THREE.DirectionalLight(0xdce8ff, 0.45);
+fillLight.position.set(-4.2, 5.2, -3.8);
+scene.add(fillLight);
+
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambientLight);
+
 const table = new THREE.Mesh(
-  new THREE.BoxGeometry(8.8, 0.5, 8.8),
+  new THREE.BoxGeometry(TABLE_SIZE, TABLE_HEIGHT, TABLE_SIZE),
   new THREE.MeshStandardMaterial({
-    color: 0x4b3a2d,
-    roughness: 0.85,
+    color: 0x7a6140,
+    roughness: 0.8,
     metalness: 0.04
   })
 );
-table.position.y = -0.38;
+table.position.y = -TABLE_HEIGHT * 0.5;
 table.receiveShadow = true;
 scene.add(table);
 
 const tableTop = new THREE.Mesh(
-  new THREE.PlaneGeometry(8.8, 8.8, 1, 1),
+  new THREE.PlaneGeometry(TABLE_SIZE, TABLE_SIZE, 1, 1),
   new THREE.MeshStandardMaterial({
-    color: 0x4f422f,
-    roughness: 0.88,
+    color: 0x8e7351,
+    roughness: 0.8,
     metalness: 0.02
   })
 );
 tableTop.rotation.x = -Math.PI / 2;
+tableTop.position.y = 0.002;
 tableTop.receiveShadow = true;
 scene.add(tableTop);
+
+const world = new CANNON.World();
+world.gravity.set(0, -14, 0);
+world.allowSleep = true;
+world.broadphase = new CANNON.SAPBroadphase(world);
+
+const cashMaterial = new CANNON.Material("cash");
+const tableMaterial = new CANNON.Material("table");
+
+world.addContactMaterial(
+  new CANNON.ContactMaterial(cashMaterial, cashMaterial, {
+    friction: 0.52,
+    restitution: 0.05
+  })
+);
+
+world.addContactMaterial(
+  new CANNON.ContactMaterial(cashMaterial, tableMaterial, {
+    friction: 0.66,
+    restitution: 0.02
+  })
+);
+
+const tableBody = new CANNON.Body({
+  mass: 0,
+  material: tableMaterial,
+  shape: new CANNON.Box(new CANNON.Vec3(TABLE_SIZE * 0.5, TABLE_HEIGHT * 0.5, TABLE_SIZE * 0.5))
+});
+tableBody.position.set(0, -TABLE_HEIGHT * 0.5, 0);
+world.addBody(tableBody);
+
+function addBoundsWalls() {
+  const wallHeight = 1.4;
+  const wallThickness = 0.16;
+  const half = TABLE_SIZE * 0.5;
+  const y = wallHeight * 0.5;
+
+  const walls = [
+    {
+      shape: new CANNON.Box(new CANNON.Vec3(half, wallHeight * 0.5, wallThickness * 0.5)),
+      pos: [0, y, half + wallThickness * 0.5]
+    },
+    {
+      shape: new CANNON.Box(new CANNON.Vec3(half, wallHeight * 0.5, wallThickness * 0.5)),
+      pos: [0, y, -half - wallThickness * 0.5]
+    },
+    {
+      shape: new CANNON.Box(new CANNON.Vec3(wallThickness * 0.5, wallHeight * 0.5, half)),
+      pos: [half + wallThickness * 0.5, y, 0]
+    },
+    {
+      shape: new CANNON.Box(new CANNON.Vec3(wallThickness * 0.5, wallHeight * 0.5, half)),
+      pos: [-half - wallThickness * 0.5, y, 0]
+    }
+  ];
+
+  for (const wall of walls) {
+    const body = new CANNON.Body({ mass: 0, material: tableMaterial });
+    body.addShape(wall.shape);
+    body.position.set(...wall.pos);
+    world.addBody(body);
+  }
+}
+
+addBoundsWalls();
 
 function makeBillGeometry(width, depth) {
   const geometry = new THREE.BoxGeometry(width, NOTE_THICKNESS, depth, 8, 1, 4);
   const pos = geometry.attributes.position;
+  const bendAmp = 0.003;
+  const waveAmp = 0.0016;
   for (let i = 0; i < pos.count; i += 1) {
     const x = pos.getX(i);
     const y = pos.getY(i);
     const z = pos.getZ(i);
-    const bend = Math.sin((x / width) * Math.PI * 1.6) * 0.012;
-    const wave = Math.sin((z / depth) * Math.PI * 2.2) * 0.006;
+    const bend = Math.sin((x / width) * Math.PI * 1.6) * bendAmp;
+    const wave = Math.sin((z / depth) * Math.PI * 2.2) * waveAmp;
     pos.setY(i, y + bend + wave);
   }
   geometry.computeVertexNormals();
@@ -276,10 +358,12 @@ function configureTexture(texture) {
   texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
+
   const bounds = analyzeOpaqueBounds(texture);
   if (bounds) {
     applyTextureCrop(texture, bounds);
   }
+
   texture.needsUpdate = true;
   return bounds;
 }
@@ -292,6 +376,7 @@ async function preloadTextures() {
     const bounds = configureTexture(texture);
     textureCache.set(filePath, { texture, bounds });
   });
+
   await Promise.all(loads);
 
   for (const denomination of DENOMINATIONS) {
@@ -318,9 +403,11 @@ function getBillGeometry(denomination) {
   const aspect = Math.max(1.2, denomination.aspect || DEFAULT_BILL_ASPECT);
   const depth = NOTE_WIDTH / aspect;
   const key = `${denomination.value}:${depth.toFixed(4)}`;
+
   if (billGeometryCache.has(key)) {
     return billGeometryCache.get(key);
   }
+
   const item = {
     geometry: makeBillGeometry(NOTE_WIDTH, depth),
     width: NOTE_WIDTH,
@@ -385,6 +472,7 @@ function getCoinGeometry(denomination) {
   if (coinGeometryCache.has(denomination.value)) {
     return coinGeometryCache.get(denomination.value);
   }
+
   const geometry = new THREE.CylinderGeometry(
     denomination.radius,
     denomination.radius,
@@ -432,168 +520,121 @@ function getCoinMaterials(denomination) {
   return materials;
 }
 
-function createCashMesh(denomination) {
+function createCashObject(denomination) {
   if (denomination.kind === "bill") {
     const billGeometry = getBillGeometry(denomination);
+    const mesh = new THREE.Mesh(billGeometry.geometry, getBillMaterials(denomination));
+    const body = new CANNON.Body({
+      mass: 0.026,
+      material: cashMaterial,
+      linearDamping: 0.32,
+      angularDamping: 0.45,
+      allowSleep: true,
+      sleepSpeedLimit: 0.1,
+      sleepTimeLimit: 0.65
+    });
+
+    body.addShape(
+      new CANNON.Box(
+        new CANNON.Vec3(
+          billGeometry.width * 0.5,
+          NOTE_THICKNESS * 0.5,
+          billGeometry.depth * 0.5
+        )
+      )
+    );
+
     return {
-      mesh: new THREE.Mesh(billGeometry.geometry, getBillMaterials(denomination)),
-      footprintW: billGeometry.width,
-      footprintD: billGeometry.depth,
-      thickness: NOTE_THICKNESS
+      mesh,
+      body,
+      kind: "bill"
     };
   }
 
+  const mesh = new THREE.Mesh(getCoinGeometry(denomination), getCoinMaterials(denomination));
+  const halfSize = denomination.radius * 0.86;
+
+  const body = new CANNON.Body({
+    mass: 0.012,
+    material: cashMaterial,
+    linearDamping: 0.2,
+    angularDamping: 0.14,
+    allowSleep: true,
+    sleepSpeedLimit: 0.12,
+    sleepTimeLimit: 0.55
+  });
+
+  body.addShape(
+    new CANNON.Box(new CANNON.Vec3(halfSize, denomination.thickness * 0.5, halfSize))
+  );
+
   return {
-    mesh: new THREE.Mesh(getCoinGeometry(denomination), getCoinMaterials(denomination)),
-    footprintW: denomination.radius * 2,
-    footprintD: denomination.radius * 2,
-    thickness: denomination.thickness
+    mesh,
+    body,
+    kind: "coin"
   };
 }
 
-function resize() {
-  const width = viewport.clientWidth;
-  const height = viewport.clientHeight;
-  camera.aspect = width / height;
-  camera.updateProjectionMatrix();
-  renderer.setSize(width, height);
-}
-
-function gridIndex(ix, iz) {
-  return (iz + GRID_HALF) * GRID_CELLS + (ix + GRID_HALF);
-}
-
-function clampGrid(value) {
-  return Math.max(-GRID_HALF, Math.min(GRID_HALF, value));
-}
-
-function getFootprintBounds(x, z, footprintW, footprintD) {
-  const halfW = footprintW * 0.5;
-  const halfD = footprintD * 0.5;
-  const minX = clampGrid(Math.floor((x - halfW) / GRID_CELL_SIZE));
-  const maxX = clampGrid(Math.ceil((x + halfW) / GRID_CELL_SIZE));
-  const minZ = clampGrid(Math.floor((z - halfD) / GRID_CELL_SIZE));
-  const maxZ = clampGrid(Math.ceil((z + halfD) / GRID_CELL_SIZE));
-  return { minX, maxX, minZ, maxZ };
-}
-
-function reservePileSpot(x, z, footprintW, footprintD, thickness) {
-  const { minX, maxX, minZ, maxZ } = getFootprintBounds(x, z, footprintW, footprintD);
-  let top = 0;
-  for (let iz = minZ; iz <= maxZ; iz += 1) {
-    for (let ix = minX; ix <= maxX; ix += 1) {
-      top = Math.max(top, pileHeightGrid[gridIndex(ix, iz)]);
-    }
-  }
-
-  const centerY = top + thickness * 0.5 + (Math.random() * 0.012 - 0.006);
-  const newTop = centerY + thickness * 0.5;
-
-  for (let iz = minZ; iz <= maxZ; iz += 1) {
-    for (let ix = minX; ix <= maxX; ix += 1) {
-      const idx = gridIndex(ix, iz);
-      pileHeightGrid[idx] = Math.max(pileHeightGrid[idx], newTop);
-    }
-  }
-  return centerY;
-}
-
 function randomDropTarget() {
-  const radius = Math.pow(Math.random(), 1.7) * PILE_RADIUS;
+  const radius = Math.pow(Math.random(), 1.7) * DROP_RADIUS;
   const theta = Math.random() * Math.PI * 2;
-  const x = Math.cos(theta) * radius;
-  const z = Math.sin(theta) * radius;
-  return { x, z };
+  return {
+    x: Math.cos(theta) * radius,
+    z: Math.sin(theta) * radius
+  };
 }
 
-function makeCash(entry) {
-  const denomination = entry.denomination;
-  const { mesh, footprintW, footprintD, thickness } = createCashMesh(denomination);
-  const target = randomDropTarget();
-  const targetY = reservePileSpot(target.x, target.z, footprintW, footprintD, thickness);
+function spawnCash(entry) {
+  const { denomination } = entry;
+  const obj = createCashObject(denomination);
+  const { mesh, body, kind } = obj;
 
   mesh.castShadow = true;
   mesh.receiveShadow = true;
 
-  if (denomination.kind === "bill") {
-    mesh.rotation.set(
-      (Math.random() - 0.5) * 0.7,
-      Math.random() * Math.PI * 2,
-      (Math.random() - 0.5) * 0.6
-    );
-  } else {
-    mesh.rotation.set(
-      (Math.random() - 0.5) * 0.42,
-      Math.random() * Math.PI * 2,
-      (Math.random() - 0.5) * 0.42
-    );
-  }
+  const target = randomDropTarget();
+  const drift = kind === "bill" ? 0.55 : 0.38;
+  const startX = target.x + (Math.random() - 0.5) * drift;
+  const startY = DROP_HEIGHT + Math.random() * 1.1;
+  const startZ = target.z + (Math.random() - 0.5) * drift;
 
-  const drift = denomination.kind === "bill" ? 0.62 : 0.45;
-  mesh.position.set(
-    target.x + (Math.random() - 0.5) * drift,
-    DROP_HEIGHT + Math.random() * 1.4,
-    target.z + (Math.random() - 0.5) * drift
+  const euler = new THREE.Euler(
+    (Math.random() - 0.5) * (kind === "bill" ? 0.22 : 0.5),
+    Math.random() * Math.PI * 2,
+    (Math.random() - 0.5) * (kind === "bill" ? 0.2 : 0.5)
+  );
+  const quat = new THREE.Quaternion().setFromEuler(euler);
+
+  mesh.position.set(startX, startY, startZ);
+  mesh.quaternion.copy(quat);
+
+  body.position.set(startX, startY, startZ);
+  body.quaternion.set(quat.x, quat.y, quat.z, quat.w);
+  body.velocity.set(
+    (Math.random() - 0.5) * (kind === "bill" ? 0.55 : 0.35),
+    -(0.2 + Math.random() * 0.3),
+    (Math.random() - 0.5) * (kind === "bill" ? 0.55 : 0.35)
+  );
+  body.angularVelocity.set(
+    (Math.random() - 0.5) * (kind === "bill" ? 1.1 : 2.6),
+    (Math.random() - 0.5) * (kind === "bill" ? 0.9 : 2.2),
+    (Math.random() - 0.5) * (kind === "bill" ? 1.1 : 2.6)
   );
 
   scene.add(mesh);
-
-  activeCash.push({
-    mesh,
-    denomination,
-    targetX: target.x,
-    targetY,
-    targetZ: target.z,
-    vx: (Math.random() - 0.5) * (denomination.kind === "bill" ? 1.45 : 1.05),
-    vy: -(1.5 + Math.random() * 1.1),
-    vz: (Math.random() - 0.5) * (denomination.kind === "bill" ? 1.45 : 1.05),
-    spin: (Math.random() - 0.5) * (denomination.kind === "bill" ? 0.4 : 1.2),
-    settleCount: 0
-  });
+  world.addBody(body);
+  cashObjects.push(obj);
 }
 
-function animateCash(delta) {
-  for (let i = activeCash.length - 1; i >= 0; i -= 1) {
-    const item = activeCash[i];
-    const { mesh } = item;
-    const isCoin = item.denomination.kind === "coin";
-    const attraction = isCoin ? 2.45 : 1.9;
-    const lateralDamp = isCoin ? 0.989 : 0.992;
-
-    item.vx += (item.targetX - mesh.position.x) * attraction * delta;
-    item.vz += (item.targetZ - mesh.position.z) * attraction * delta;
-    item.vy -= 25.5 * delta;
-
-    item.vx *= lateralDamp;
-    item.vz *= lateralDamp;
-
-    mesh.position.x += item.vx * delta;
-    mesh.position.y += item.vy * delta;
-    mesh.position.z += item.vz * delta;
-
-    mesh.rotation.x += item.vz * delta * (isCoin ? 0.42 : 0.18);
-    mesh.rotation.z -= item.vx * delta * (isCoin ? 0.42 : 0.18);
-    mesh.rotation.y += item.spin * delta + (item.vx + item.vz) * delta * 0.1;
-
-    if (mesh.position.y <= item.targetY) {
-      mesh.position.y = item.targetY;
-
-      if (Math.abs(item.vy) > 1.5 && item.settleCount < 2) {
-        const bounce = isCoin ? 0.12 : 0.16;
-        item.vy = -item.vy * (bounce - item.settleCount * 0.04);
-        item.vx *= 0.5;
-        item.vz *= 0.5;
-        item.settleCount += 1;
-      } else {
-        mesh.position.x = THREE.MathUtils.lerp(mesh.position.x, item.targetX, 0.45);
-        mesh.position.z = THREE.MathUtils.lerp(mesh.position.z, item.targetZ, 0.45);
-        item.vx = 0;
-        item.vy = 0;
-        item.vz = 0;
-        activeCash.splice(i, 1);
-        placedCash.push(mesh);
-      }
-    }
+function syncMeshesFromPhysics() {
+  for (const obj of cashObjects) {
+    obj.mesh.position.set(obj.body.position.x, obj.body.position.y, obj.body.position.z);
+    obj.mesh.quaternion.set(
+      obj.body.quaternion.x,
+      obj.body.quaternion.y,
+      obj.body.quaternion.z,
+      obj.body.quaternion.w
+    );
   }
 }
 
@@ -638,7 +679,6 @@ function parseAmount(raw) {
     }
   }
 
-  // Shuffle so bills/coins are mixed while falling.
   for (let i = itemQueue.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
     const t = itemQueue[i];
@@ -678,9 +718,11 @@ function queueFromAmount() {
   for (const entry of parsed.itemQueue) {
     pendingQueue.push(entry);
   }
-  lastQueueMeta = parsed;
 
+  lastQueueMeta = parsed;
   running = true;
+  spawnAccumulator = 0;
+  settleAccumulator = 0;
   dropButton.disabled = true;
 
   const amountText = new Intl.NumberFormat("ja-JP").format(parsed.original);
@@ -690,65 +732,112 @@ function queueFromAmount() {
   const hints = [];
   if (parsed.bundleSize > 1) {
     const bundleText = new Intl.NumberFormat("ja-JP").format(parsed.bundleSize);
-    hints.push(`描画負荷対策として1オブジェクトを約${bundleText}枚分として圧縮表示しています。`);
+    hints.push(`描画負荷対策として1オブジェクトを約${bundleText}個分として圧縮表示しています。`);
   }
+
   const details = parsed.denominationCounts
     .filter((x) => x.count > 0)
     .slice(0, 4)
     .map((x) => `${x.denomination.label}×${x.count}`)
     .join(" / ");
   if (details) {
-    hints.push(`内訳: ${details}${parsed.denominationCounts.filter((x) => x.count > 0).length > 4 ? " ..." : ""}`);
+    const more = parsed.denominationCounts.filter((x) => x.count > 0).length > 4 ? " ..." : "";
+    hints.push(`内訳: ${details}${more}`);
   }
+
   hintLine.textContent = hints.join(" ");
 }
 
 function clearAll() {
   pendingQueue.length = 0;
-  activeCash.forEach((n) => scene.remove(n.mesh));
-  placedCash.forEach((mesh) => scene.remove(mesh));
-  activeCash.length = 0;
-  placedCash.length = 0;
-  pileHeightGrid.fill(0);
+
+  for (const obj of cashObjects) {
+    scene.remove(obj.mesh);
+    world.removeBody(obj.body);
+  }
+  cashObjects.length = 0;
+
   running = false;
+  settleAccumulator = 0;
   lastQueueMeta = null;
   dropButton.disabled = !assetsReady;
+
   updateStatus("リセットしました。");
   hintLine.textContent = "";
 }
 
+function isBodySettled(body) {
+  if (body.sleepState === CANNON.Body.SLEEPING) {
+    return true;
+  }
+
+  const v2 = body.velocity.lengthSquared();
+  const w2 = body.angularVelocity.lengthSquared();
+  return v2 < SETTLE_SPEED_SQ && w2 < SETTLE_ANGULAR_SPEED_SQ;
+}
+
+function isPileSettled() {
+  if (cashObjects.length === 0) {
+    return true;
+  }
+
+  for (const obj of cashObjects) {
+    if (!isBodySettled(obj.body)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function resize() {
+  const width = viewport.clientWidth;
+  const height = viewport.clientHeight;
+  camera.aspect = width / height;
+  camera.updateProjectionMatrix();
+  renderer.setSize(width, height);
+}
+
 dropButton.addEventListener("click", queueFromAmount);
 clearButton.addEventListener("click", clearAll);
-
 window.addEventListener("resize", resize);
 resize();
 
 const clock = new THREE.Clock();
 
 function tick() {
-  const delta = Math.min(clock.getDelta(), 0.033);
+  const delta = Math.min(clock.getDelta(), 0.05);
   spawnAccumulator += delta;
 
-  if (pendingQueue.length > 0 && spawnAccumulator > 0.042) {
+  if (running && pendingQueue.length > 0 && spawnAccumulator >= SPAWN_INTERVAL) {
     spawnAccumulator = 0;
     const next = pendingQueue.pop();
-    makeCash(next);
+    spawnCash(next);
   }
 
-  animateCash(delta);
+  world.step(FIXED_TIMESTEP, delta, MAX_SUBSTEPS);
+  syncMeshesFromPhysics();
 
-  if (running && pendingQueue.length === 0 && activeCash.length === 0) {
-    running = false;
-    dropButton.disabled = !assetsReady;
-    const placedText = new Intl.NumberFormat("ja-JP").format(placedCash.length);
-    const representedText = lastQueueMeta
-      ? new Intl.NumberFormat("ja-JP").format(lastQueueMeta.representedAmount)
-      : null;
-    updateStatus(
-      representedText
-        ? `着地完了: ${placedText}個で約${representedText}円を表示`
-        : `着地完了: ${placedText}個を表示`
-    );
+  if (running && pendingQueue.length === 0) {
+    if (isPileSettled()) {
+      settleAccumulator += delta;
+    } else {
+      settleAccumulator = 0;
+    }
+
+    if (settleAccumulator > 0.75) {
+      running = false;
+      dropButton.disabled = !assetsReady;
+      const placedText = new Intl.NumberFormat("ja-JP").format(cashObjects.length);
+      const representedText = lastQueueMeta
+        ? new Intl.NumberFormat("ja-JP").format(lastQueueMeta.representedAmount)
+        : null;
+      updateStatus(
+        representedText
+          ? `着地完了: ${placedText}個で約${representedText}円を表示`
+          : `着地完了: ${placedText}個を表示`
+      );
+    }
   }
 
   controls.update();
@@ -762,6 +851,7 @@ async function initAssets() {
   dropButton.disabled = true;
   updateStatus("画像を読み込み中...");
   hintLine.textContent = "";
+
   try {
     await preloadTextures();
     assetsReady = true;
