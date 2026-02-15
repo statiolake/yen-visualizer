@@ -8,7 +8,15 @@ const viewport = document.querySelector("#viewport");
 const selectedTotalOverlay = document.querySelector("#selectedTotalOverlay");
 const selectedTotalValue = document.querySelector("#selectedTotalValue");
 const payButton = document.querySelector("#payButton");
+const gameHud = document.querySelector("#gameHud");
+const gameRoundValue = document.querySelector("#gameRoundValue");
+const gameTargetValue = document.querySelector("#gameTargetValue");
+const gameTimeValue = document.querySelector("#gameTimeValue");
+const gameMessage = document.querySelector("#gameMessage");
+const gameToggleButton = document.querySelector("#gameToggleButton");
+const gameRankingList = document.querySelector("#gameRankingList");
 const AMOUNT_STORAGE_KEY = "cash-simulator.amount-jpy.v1";
+const GAME_RANKING_STORAGE_KEY = "cash-simulator.game-ranking.v1";
 
 const IMAGE_DIR = "./money_images";
 const NOTE_WIDTH = 1.5;
@@ -42,6 +50,11 @@ const PAYMENT_TRAY_INNER_PADDING = 0.12;
 const PAYMENT_TRAY_PHYSICS_MIN_HALF_THICKNESS = 0.06;
 const PAYMENT_TRAY_CENTER_Z =
   -INTERACTION_BOUNDS_HALF + PAYMENT_TRAY_DEPTH * 0.5 + PAYMENT_TRAY_RIM_THICKNESS + 0.14;
+const GAME_START_AMOUNT = 10000;
+const GAME_ROUND_COUNT = 5;
+const GAME_TARGET_MIN = 1;
+const GAME_TARGET_MAX = 2000;
+const GAME_RANKING_KEEP = 8;
 
 const TABLE_RENDER_SIZE = 120;
 const CAMERA_BASE_POS = new THREE.Vector3(0, 5.8, 4.9);
@@ -200,6 +213,20 @@ let settleAccumulator = 0;
 let running = false;
 let assetsReady = false;
 let lastOverlayTotal = -1;
+let suppressAmountPersistence = false;
+let lastGameHudSignature = "";
+
+const gameState = {
+  active: false,
+  rounds: [],
+  roundIndex: 0,
+  startTimeMs: 0,
+  elapsedMs: 0,
+  message: "",
+  savedAmountValue: "0",
+  savedStorageValue: null,
+  ranking: []
+};
 
 function normalizeAmountValue(raw) {
   const n = Number(raw);
@@ -210,6 +237,9 @@ function normalizeAmountValue(raw) {
 }
 
 function persistAmountToStorage() {
+  if (suppressAmountPersistence || gameState.active) {
+    return;
+  }
   const normalized = normalizeAmountValue(amountInput.value);
   if (normalized === null) {
     return;
@@ -230,6 +260,240 @@ function restoreAmountFromStorage() {
       amountInput.value = normalized;
     }
   } catch {}
+}
+
+function setAmountInputValue(rawValue, options = {}) {
+  const normalized = normalizeAmountValue(rawValue);
+  if (normalized === null) {
+    return false;
+  }
+  amountInput.value = normalized;
+  if (options.persist !== false) {
+    persistAmountToStorage();
+  }
+  return true;
+}
+
+function formatElapsedMs(ms) {
+  const totalMs = Math.max(0, Math.floor(ms));
+  const minutes = Math.floor(totalMs / 60000);
+  const seconds = Math.floor((totalMs % 60000) / 1000);
+  const centi = Math.floor((totalMs % 1000) / 10);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(centi).padStart(2, "0")}`;
+}
+
+function generateGameRounds() {
+  const rounds = [];
+  for (let i = 0; i < GAME_ROUND_COUNT; i += 1) {
+    const value = GAME_TARGET_MIN + Math.floor(Math.random() * (GAME_TARGET_MAX - GAME_TARGET_MIN + 1));
+    rounds.push(value);
+  }
+  return rounds;
+}
+
+function getCurrentGameTarget() {
+  if (!gameState.active) {
+    return 0;
+  }
+  return gameState.rounds[gameState.roundIndex] ?? 0;
+}
+
+function loadGameRankingFromStorage() {
+  try {
+    const raw = window.localStorage.getItem(GAME_RANKING_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const sanitized = [];
+    for (const entry of parsed) {
+      const ms = Number(entry?.ms);
+      const at = Number(entry?.at);
+      if (Number.isFinite(ms) && ms > 0 && Number.isFinite(at) && at > 0) {
+        sanitized.push({ ms: Math.floor(ms), at: Math.floor(at) });
+      }
+    }
+    sanitized.sort((a, b) => a.ms - b.ms);
+    return sanitized.slice(0, GAME_RANKING_KEEP);
+  } catch {
+    return [];
+  }
+}
+
+function saveGameRankingToStorage() {
+  try {
+    window.localStorage.setItem(
+      GAME_RANKING_STORAGE_KEY,
+      JSON.stringify(gameState.ranking.slice(0, GAME_RANKING_KEEP))
+    );
+  } catch {}
+}
+
+function renderGameRanking() {
+  if (!gameRankingList) {
+    return;
+  }
+
+  gameRankingList.innerHTML = "";
+  if (gameState.ranking.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = "まだ記録なし";
+    gameRankingList.appendChild(li);
+    return;
+  }
+
+  const max = Math.min(gameState.ranking.length, GAME_RANKING_KEEP);
+  for (let i = 0; i < max; i += 1) {
+    const record = gameState.ranking[i];
+    const li = document.createElement("li");
+    li.textContent = `${i + 1}. ${formatElapsedMs(record.ms)}`;
+    gameRankingList.appendChild(li);
+  }
+}
+
+function updateGameToggleButton() {
+  if (!gameToggleButton) {
+    return;
+  }
+  gameToggleButton.textContent = gameState.active ? "■" : "▶";
+  gameToggleButton.classList.toggle("is-active", gameState.active);
+  gameToggleButton.setAttribute("aria-label", gameState.active ? "ゲームモード停止" : "ゲームモード開始");
+  gameToggleButton.title = gameState.active ? "ゲームモード停止" : "ゲームモード開始";
+}
+
+function updateGameHud(force = false) {
+  if (!gameHud || !gameRoundValue || !gameTargetValue || !gameTimeValue || !gameMessage) {
+    return;
+  }
+
+  if (!gameState.active) {
+    gameHud.classList.remove("is-visible");
+    if (force) {
+      gameRoundValue.textContent = "";
+      gameTargetValue.textContent = "";
+      gameTimeValue.textContent = "";
+      gameMessage.textContent = "";
+      lastGameHudSignature = "";
+    }
+    return;
+  }
+
+  const roundText = `${Math.min(gameState.roundIndex + 1, gameState.rounds.length)}/${gameState.rounds.length}`;
+  const targetText = `${formatYen(getCurrentGameTarget())}円`;
+  const timeText = formatElapsedMs(gameState.elapsedMs);
+  const messageText = gameState.message;
+  const signature = `${roundText}|${targetText}|${timeText}|${messageText}`;
+  if (!force && signature === lastGameHudSignature) {
+    return;
+  }
+  lastGameHudSignature = signature;
+
+  gameRoundValue.textContent = `Round ${roundText}`;
+  gameTargetValue.textContent = `目標 ${targetText}`;
+  gameTimeValue.textContent = timeText;
+  gameMessage.textContent = messageText;
+  gameHud.classList.add("is-visible");
+}
+
+function setGameUiLocked(locked) {
+  amountInput.disabled = locked;
+  dropButton.disabled = locked || !assetsReady;
+  visualizeForm.classList.toggle("is-game-locked", locked);
+}
+
+function captureAmountStorageSnapshot() {
+  try {
+    return window.localStorage.getItem(AMOUNT_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function restoreAmountStorageSnapshot(snapshot) {
+  try {
+    if (snapshot === null) {
+      window.localStorage.removeItem(AMOUNT_STORAGE_KEY);
+    } else {
+      window.localStorage.setItem(AMOUNT_STORAGE_KEY, snapshot);
+    }
+  } catch {}
+}
+
+function completeGameModeAndRecord() {
+  if (!gameState.active) {
+    return;
+  }
+  gameState.elapsedMs = performance.now() - gameState.startTimeMs;
+  gameState.ranking.push({
+    ms: Math.floor(gameState.elapsedMs),
+    at: Date.now()
+  });
+  gameState.ranking.sort((a, b) => a.ms - b.ms);
+  gameState.ranking = gameState.ranking.slice(0, GAME_RANKING_KEEP);
+  saveGameRankingToStorage();
+  renderGameRanking();
+  stopGameMode(true);
+}
+
+function startGameMode() {
+  if (gameState.active || !assetsReady) {
+    return;
+  }
+
+  flushPendingTapSelection();
+  gameState.savedAmountValue = normalizeAmountValue(amountInput.value) ?? "0";
+  gameState.savedStorageValue = captureAmountStorageSnapshot();
+  gameState.rounds = generateGameRounds();
+  gameState.roundIndex = 0;
+  gameState.startTimeMs = performance.now();
+  gameState.elapsedMs = 0;
+  gameState.message = "";
+  gameState.active = true;
+
+  setGameUiLocked(true);
+  setAmountInputValue(GAME_START_AMOUNT, { persist: false });
+  queueFromAmount();
+  updateGameToggleButton();
+  updateGameHud(true);
+}
+
+function stopGameMode(completed = false) {
+  if (!gameState.active) {
+    return;
+  }
+
+  flushPendingTapSelection();
+  gameState.active = false;
+  gameState.rounds = [];
+  gameState.roundIndex = 0;
+  gameState.startTimeMs = 0;
+  gameState.message = "";
+
+  suppressAmountPersistence = true;
+  const restored = normalizeAmountValue(gameState.savedAmountValue) ?? "0";
+  setAmountInputValue(restored, { persist: false });
+  if (Number(restored) > 0) {
+    queueFromAmount();
+  } else {
+    clearAll();
+  }
+  suppressAmountPersistence = false;
+  restoreAmountStorageSnapshot(gameState.savedStorageValue);
+  setGameUiLocked(false);
+
+  updateGameToggleButton();
+  updateGameHud(true);
+}
+
+function onGameToggleButtonClick() {
+  if (gameState.active) {
+    stopGameMode(false);
+  } else {
+    startGameMode();
+  }
 }
 
 const scene = new THREE.Scene();
@@ -1607,15 +1871,40 @@ function onPayButtonClick() {
     return;
   }
 
+  if (gameState.active) {
+    const targetAmount = getCurrentGameTarget();
+    if (payAmount !== targetAmount) {
+      if (payAmount < targetAmount) {
+        gameState.message = `不足 ${formatYen(targetAmount - payAmount)}円`;
+      } else {
+        gameState.message = `超過 ${formatYen(payAmount - targetAmount)}円`;
+      }
+      updateGameHud(true);
+      return;
+    }
+  }
+
   const current = Number(amountInput.value);
   const base = Number.isFinite(current) ? Math.max(0, Math.floor(current)) : 0;
   const next = Math.max(0, base - payAmount);
-  amountInput.value = String(next);
-  persistAmountToStorage();
+  setAmountInputValue(next, { persist: !gameState.active });
 
   for (const obj of targets) {
     removeCashObject(obj);
   }
+
+  if (!gameState.active) {
+    return;
+  }
+
+  gameState.roundIndex += 1;
+  if (gameState.roundIndex >= gameState.rounds.length) {
+    completeGameModeAndRecord();
+    return;
+  }
+
+  gameState.message = "";
+  updateGameHud(true);
 }
 
 function isBodySettled(body) {
@@ -1658,6 +1947,9 @@ visualizeForm.addEventListener("submit", queueFromAmount);
 payButton.addEventListener("click", onPayButtonClick);
 amountInput.addEventListener("input", persistAmountToStorage);
 amountInput.addEventListener("change", persistAmountToStorage);
+if (gameToggleButton) {
+  gameToggleButton.addEventListener("click", onGameToggleButtonClick);
+}
 viewport.addEventListener("pointerdown", onViewportPointerDown);
 viewport.addEventListener("pointermove", onViewportPointerMove);
 viewport.addEventListener("pointerup", onViewportPointerUp);
@@ -1665,6 +1957,10 @@ viewport.addEventListener("pointercancel", onViewportPointerCancel);
 viewport.addEventListener("contextmenu", onViewportContextMenu);
 window.addEventListener("resize", resize);
 restoreAmountFromStorage();
+gameState.ranking = loadGameRankingFromStorage();
+renderGameRanking();
+updateGameToggleButton();
+updateGameHud(true);
 resize();
 updateSelectedTotalOverlay();
 
@@ -1686,6 +1982,10 @@ function tick() {
   world.step(FIXED_TIMESTEP, delta, MAX_SUBSTEPS);
   syncMeshesFromPhysics();
   updateSelectedTotalOverlay();
+  if (gameState.active) {
+    gameState.elapsedMs = performance.now() - gameState.startTimeMs;
+    updateGameHud();
+  }
 
   if (running && pendingQueue.length === 0) {
     if (isPileSettled()) {
@@ -1711,7 +2011,7 @@ async function initAssets() {
   try {
     await preloadTextures();
     assetsReady = true;
-    dropButton.disabled = false;
+    dropButton.disabled = gameState.active;
   } catch (error) {
     console.error(error);
     assetsReady = false;

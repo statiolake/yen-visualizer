@@ -37,6 +37,28 @@
         <span id="selectedTotalValue"></span>
         <button id="payButton" type="button">支払う</button>
       </div>
+
+      <div id="gameHud" class="game-hud" aria-live="polite">
+        <span id="gameRoundValue"></span>
+        <span id="gameTargetValue"></span>
+        <span id="gameTimeValue"></span>
+        <span id="gameMessage"></span>
+      </div>
+
+      <aside class="game-ranking" aria-label="タイムトライアルランキング">
+        <div class="game-ranking-title">Time Trial</div>
+        <ol id="gameRankingList"></ol>
+      </aside>
+
+      <button
+        id="gameToggleButton"
+        class="game-toggle"
+        type="button"
+        aria-label="ゲームモード開始"
+        title="ゲームモード開始"
+      >
+        ▶
+      </button>
     </main>
 
     <script type="module" src="./app.js"></script>
