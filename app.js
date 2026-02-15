@@ -8,6 +8,7 @@ const viewport = document.querySelector("#viewport");
 const selectedTotalOverlay = document.querySelector("#selectedTotalOverlay");
 const selectedTotalValue = document.querySelector("#selectedTotalValue");
 const payButton = document.querySelector("#payButton");
+const AMOUNT_STORAGE_KEY = "cash-simulator.amount-jpy.v1";
 
 const IMAGE_DIR = "./money_images";
 const NOTE_WIDTH = 1.5;
@@ -199,6 +200,37 @@ let settleAccumulator = 0;
 let running = false;
 let assetsReady = false;
 let lastOverlayTotal = -1;
+
+function normalizeAmountValue(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    return null;
+  }
+  return String(Math.max(0, Math.floor(n)));
+}
+
+function persistAmountToStorage() {
+  const normalized = normalizeAmountValue(amountInput.value);
+  if (normalized === null) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(AMOUNT_STORAGE_KEY, normalized);
+  } catch {}
+}
+
+function restoreAmountFromStorage() {
+  try {
+    const stored = window.localStorage.getItem(AMOUNT_STORAGE_KEY);
+    if (stored === null) {
+      return;
+    }
+    const normalized = normalizeAmountValue(stored);
+    if (normalized !== null) {
+      amountInput.value = normalized;
+    }
+  } catch {}
+}
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x5f7f6d);
@@ -1154,6 +1186,7 @@ function queueFromAmount(event) {
     return;
   }
 
+  persistAmountToStorage();
   clearAll();
 
   pendingQueue.length = 0;
@@ -1578,6 +1611,7 @@ function onPayButtonClick() {
   const base = Number.isFinite(current) ? Math.max(0, Math.floor(current)) : 0;
   const next = Math.max(0, base - payAmount);
   amountInput.value = String(next);
+  persistAmountToStorage();
 
   for (const obj of targets) {
     removeCashObject(obj);
@@ -1622,12 +1656,15 @@ function resize() {
 
 visualizeForm.addEventListener("submit", queueFromAmount);
 payButton.addEventListener("click", onPayButtonClick);
+amountInput.addEventListener("input", persistAmountToStorage);
+amountInput.addEventListener("change", persistAmountToStorage);
 viewport.addEventListener("pointerdown", onViewportPointerDown);
 viewport.addEventListener("pointermove", onViewportPointerMove);
 viewport.addEventListener("pointerup", onViewportPointerUp);
 viewport.addEventListener("pointercancel", onViewportPointerCancel);
 viewport.addEventListener("contextmenu", onViewportContextMenu);
 window.addEventListener("resize", resize);
+restoreAmountFromStorage();
 resize();
 updateSelectedTotalOverlay();
 
