@@ -38,6 +38,7 @@ const PAYMENT_TRAY_BASE_THICKNESS = 0.018;
 const PAYMENT_TRAY_RIM_THICKNESS = 0.08;
 const PAYMENT_TRAY_WALL_HEIGHT = 0.065;
 const PAYMENT_TRAY_INNER_PADDING = 0.12;
+const PAYMENT_TRAY_PHYSICS_MIN_HALF_THICKNESS = 0.06;
 const PAYMENT_TRAY_CENTER_Z =
   -INTERACTION_BOUNDS_HALF + PAYMENT_TRAY_DEPTH * 0.5 + PAYMENT_TRAY_RIM_THICKNESS + 0.14;
 
@@ -49,7 +50,7 @@ const CAMERA_PAN_LIMIT_Z = 1.25;
 
 const SPAWN_INTERVAL = 0.04;
 const FIXED_TIMESTEP = 1 / 60;
-const MAX_SUBSTEPS = 6;
+const MAX_SUBSTEPS = 10;
 const SETTLE_SPEED_SQ = 0.04;
 const SETTLE_ANGULAR_SPEED_SQ = 0.08;
 
@@ -353,6 +354,8 @@ const world = new CANNON.World();
 world.gravity.set(0, -14, 0);
 world.allowSleep = true;
 world.broadphase = new CANNON.SAPBroadphase(world);
+world.solver.iterations = 18;
+world.solver.tolerance = 0.0005;
 
 const cashMaterial = new CANNON.Material("cash");
 const tableMaterial = new CANNON.Material("table");
@@ -381,6 +384,12 @@ tableBody.position.set(0, 0, 0);
 world.addBody(tableBody);
 
 function addPaymentTrayPhysics() {
+  const trayTopY = PAYMENT_TRAY_BASE_THICKNESS;
+  const trayHalfThickness = Math.max(
+    PAYMENT_TRAY_BASE_THICKNESS * 0.5,
+    PAYMENT_TRAY_PHYSICS_MIN_HALF_THICKNESS
+  );
+
   const baseBody = new CANNON.Body({
     mass: 0,
     material: tableMaterial
@@ -389,14 +398,14 @@ function addPaymentTrayPhysics() {
     new CANNON.Box(
       new CANNON.Vec3(
         PAYMENT_TRAY_WIDTH * 0.5,
-        PAYMENT_TRAY_BASE_THICKNESS * 0.5,
+        trayHalfThickness,
         PAYMENT_TRAY_DEPTH * 0.5
       )
     )
   );
   baseBody.position.set(
     PAYMENT_TRAY_CENTER_X,
-    PAYMENT_TRAY_BASE_THICKNESS * 0.5,
+    trayTopY - trayHalfThickness,
     PAYMENT_TRAY_CENTER_Z
   );
   world.addBody(baseBody);
