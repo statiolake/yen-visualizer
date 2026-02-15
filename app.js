@@ -22,6 +22,8 @@ const IMAGE_DIR = "./money_images";
 const NOTE_WIDTH = 1.5;
 const NOTE_DEPTH = 0.68;
 const NOTE_THICKNESS = 0.013;
+const NOTE_COLLISION_THICKNESS = 0.022;
+const COIN_COLLISION_THICKNESS_SCALE = 1.42;
 const DEFAULT_BILL_ASPECT = NOTE_WIDTH / NOTE_DEPTH;
 const DROP_HEIGHT = 4.25;
 const DROP_RADIUS = 1.45;
@@ -71,9 +73,11 @@ const CAMERA_PAN_LIMIT_Z = 1.25;
 
 const SPAWN_INTERVAL = 0.04;
 const FIXED_TIMESTEP = 1 / 60;
-const MAX_SUBSTEPS = 10;
+const MAX_SUBSTEPS = 16;
 const SETTLE_SPEED_SQ = 0.04;
 const SETTLE_ANGULAR_SPEED_SQ = 0.08;
+const MAX_BODY_LINEAR_SPEED = 20;
+const MAX_BODY_ANGULAR_SPEED = 28;
 
 const DENOMINATIONS = [
   {
@@ -705,8 +709,12 @@ const world = new CANNON.World();
 world.gravity.set(0, -14, 0);
 world.allowSleep = true;
 world.broadphase = new CANNON.SAPBroadphase(world);
-world.solver.iterations = 18;
-world.solver.tolerance = 0.0005;
+world.solver.iterations = 28;
+world.solver.tolerance = 0.0001;
+world.defaultContactMaterial.contactEquationStiffness = 1e9;
+world.defaultContactMaterial.contactEquationRelaxation = 3;
+world.defaultContactMaterial.frictionEquationStiffness = 1e8;
+world.defaultContactMaterial.frictionEquationRelaxation = 3;
 
 const cashMaterial = new CANNON.Material("cash");
 const tableMaterial = new CANNON.Material("table");
@@ -714,14 +722,18 @@ const tableMaterial = new CANNON.Material("table");
 world.addContactMaterial(
   new CANNON.ContactMaterial(cashMaterial, cashMaterial, {
     friction: 0.52,
-    restitution: 0.05
+    restitution: 0.05,
+    contactEquationStiffness: 1e9,
+    contactEquationRelaxation: 3
   })
 );
 
 world.addContactMaterial(
   new CANNON.ContactMaterial(cashMaterial, tableMaterial, {
     friction: 0.66,
-    restitution: 0.02
+    restitution: 0.02,
+    contactEquationStiffness: 1e9,
+    contactEquationRelaxation: 3
   })
 );
 
@@ -1123,7 +1135,7 @@ function createCashObject(denomination) {
       new CANNON.Box(
         new CANNON.Vec3(
           billGeometry.width * 0.5,
-          NOTE_THICKNESS * 0.5,
+          NOTE_COLLISION_THICKNESS * 0.5,
           billGeometry.depth * 0.5
         )
       )
@@ -1150,7 +1162,13 @@ function createCashObject(denomination) {
   });
 
   body.addShape(
-    new CANNON.Box(new CANNON.Vec3(halfSize, denomination.thickness * 0.5, halfSize))
+    new CANNON.Box(
+      new CANNON.Vec3(
+        halfSize,
+        denomination.thickness * COIN_COLLISION_THICKNESS_SCALE * 0.5,
+        halfSize
+      )
+    )
   );
 
   return {
@@ -1726,6 +1744,28 @@ function applyCameraPanFollow(delta) {
   }
 }
 
+function clampDynamicBodySpeeds() {
+  const maxLinSq = MAX_BODY_LINEAR_SPEED * MAX_BODY_LINEAR_SPEED;
+  const maxAngSq = MAX_BODY_ANGULAR_SPEED * MAX_BODY_ANGULAR_SPEED;
+
+  for (const obj of cashObjects) {
+    const body = obj.body;
+    if (body.type !== CANNON.Body.DYNAMIC) {
+      continue;
+    }
+
+    const lv2 = body.velocity.lengthSquared();
+    if (lv2 > maxLinSq && lv2 > 1e-8) {
+      body.velocity.scale(MAX_BODY_LINEAR_SPEED / Math.sqrt(lv2), body.velocity);
+    }
+
+    const av2 = body.angularVelocity.lengthSquared();
+    if (av2 > maxAngSq && av2 > 1e-8) {
+      body.angularVelocity.scale(MAX_BODY_ANGULAR_SPEED / Math.sqrt(av2), body.angularVelocity);
+    }
+  }
+}
+
 function finishDragging() {
   if (!dragState.active || !dragState.obj) {
     return;
@@ -2139,6 +2179,7 @@ function tick() {
 
   applyDraggedBodyFollow(delta);
   applyCameraPanFollow(delta);
+  clampDynamicBodySpeeds();
 
   world.step(FIXED_TIMESTEP, delta, MAX_SUBSTEPS);
   processPayoutRemovalQueue(nowMs);
