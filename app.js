@@ -302,6 +302,17 @@ function getCurrentGameTarget() {
   return gameState.rounds[gameState.roundIndex] ?? 0;
 }
 
+function getGamePlannedTotal(rounds) {
+  if (!Array.isArray(rounds) || rounds.length === 0) {
+    return 0;
+  }
+  let total = 0;
+  for (const value of rounds) {
+    total += Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  }
+  return total;
+}
+
 function loadGameRankingFromStorage() {
   try {
     const raw = window.localStorage.getItem(GAME_RANKING_STORAGE_KEY);
@@ -316,8 +327,13 @@ function loadGameRankingFromStorage() {
     for (const entry of parsed) {
       const ms = Number(entry?.ms);
       const at = Number(entry?.at);
+      const totalPaid = Number(entry?.totalPaid);
       if (Number.isFinite(ms) && ms > 0 && Number.isFinite(at) && at > 0) {
-        sanitized.push({ ms: Math.floor(ms), at: Math.floor(at) });
+        sanitized.push({
+          ms: Math.floor(ms),
+          at: Math.floor(at),
+          totalPaid: Number.isFinite(totalPaid) && totalPaid >= 0 ? Math.floor(totalPaid) : 0
+        });
       }
     }
     sanitized.sort((a, b) => a.ms - b.ms);
@@ -334,6 +350,17 @@ function saveGameRankingToStorage() {
       JSON.stringify(gameState.ranking.slice(0, GAME_RANKING_KEEP))
     );
   } catch {}
+}
+
+function createBestScoreTweetUrl(record) {
+  const params = new URLSearchParams();
+  const totalPaid = Number.isFinite(record?.totalPaid) ? Math.max(0, Math.floor(record.totalPaid)) : 0;
+  params.set("text", `${formatElapsedMs(record.ms)}で合計${formatYen(totalPaid)}円を支払いました！`);
+  try {
+    const shareUrl = window.location.href.split("#")[0];
+    params.set("url", shareUrl);
+  } catch {}
+  return `https://twitter.com/intent/tweet?${params.toString()}`;
 }
 
 function renderGameRanking() {
@@ -353,7 +380,23 @@ function renderGameRanking() {
   for (let i = 0; i < max; i += 1) {
     const record = gameState.ranking[i];
     const li = document.createElement("li");
-    li.textContent = `${i + 1}. ${formatElapsedMs(record.ms)}`;
+    const label = document.createElement("span");
+    label.className = "ranking-label";
+    label.textContent = `${i + 1}. ${formatElapsedMs(record.ms)}`;
+    li.appendChild(label);
+
+    if (i === 0) {
+      const shareLink = document.createElement("a");
+      shareLink.className = "ranking-share-x";
+      shareLink.href = createBestScoreTweetUrl(record);
+      shareLink.target = "_blank";
+      shareLink.rel = "noopener noreferrer";
+      shareLink.setAttribute("aria-label", "1位スコアをXでシェア");
+      shareLink.title = "1位スコアをXでシェア";
+      shareLink.textContent = "𝕏";
+      li.appendChild(shareLink);
+    }
+
     gameRankingList.appendChild(li);
   }
 }
@@ -431,9 +474,11 @@ function completeGameModeAndRecord() {
     return;
   }
   gameState.elapsedMs = performance.now() - gameState.startTimeMs;
+  const totalPaid = getGamePlannedTotal(gameState.rounds);
   gameState.ranking.push({
     ms: Math.floor(gameState.elapsedMs),
-    at: Date.now()
+    at: Date.now(),
+    totalPaid
   });
   gameState.ranking.sort((a, b) => a.ms - b.ms);
   gameState.ranking = gameState.ranking.slice(0, GAME_RANKING_KEEP);
