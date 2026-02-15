@@ -22,13 +22,13 @@ const DRAG_LIFT_HEIGHT = 0.12;
 const DRAG_START_PIXELS = 8;
 const DOUBLE_TAP_INTERVAL_MS = 280;
 const DOUBLE_TAP_MAX_DISTANCE = 28;
-const ASIDE_COLS = 3;
+const ASIDE_COLS_DESKTOP = 6;
+const ASIDE_COLS_MOBILE = 4;
 const ASIDE_ROWS = 16;
-const ASIDE_COL_STEP = 0.28;
+const ASIDE_COL_STEP = 0.31;
 const ASIDE_ROW_STEP = 0.22;
 const ASIDE_LAYER_STEP = 0.09;
-const ASIDE_BASE_X = INTERACTION_BOUNDS_HALF - 0.38;
-const ASIDE_START_Z = -1.72;
+const ASIDE_TOP_Z = -INTERACTION_BOUNDS_HALF + 0.55;
 
 const TABLE_RENDER_SIZE = 120;
 const CAMERA_POS = new THREE.Vector3(0, 5.8, 4.9);
@@ -660,23 +660,27 @@ function updateSelectedTotalOverlay() {
 }
 
 function applyAsideLayout() {
+  const cols = window.innerWidth <= 720 ? ASIDE_COLS_MOBILE : ASIDE_COLS_DESKTOP;
+  const xStart = -((cols - 1) * ASIDE_COL_STEP) * 0.5;
+
   for (let i = 0; i < selectedObjects.length; i += 1) {
     const obj = selectedObjects[i];
-    const slot = i % (ASIDE_COLS * ASIDE_ROWS);
-    const layer = Math.floor(i / (ASIDE_COLS * ASIDE_ROWS));
-    const col = slot % ASIDE_COLS;
-    const row = Math.floor(slot / ASIDE_COLS);
+    const slot = i % (cols * ASIDE_ROWS);
+    const layer = Math.floor(i / (cols * ASIDE_ROWS));
+    const col = slot % cols;
+    const row = Math.floor(slot / cols);
 
-    const x = ASIDE_BASE_X - col * ASIDE_COL_STEP;
-    const z = ASIDE_START_Z + row * ASIDE_ROW_STEP;
+    const rawX = xStart + col * ASIDE_COL_STEP;
+    const rawZ = ASIDE_TOP_Z + row * ASIDE_ROW_STEP;
+    const clamped = clampToBounds(rawX, rawZ, 0.24);
     const y = 0.03 + layer * ASIDE_LAYER_STEP;
-    const yaw = (col - (ASIDE_COLS - 1) * 0.5) * 0.08;
+    const yaw = (col - (cols - 1) * 0.5) * 0.05 + (row % 2 === 0 ? -0.02 : 0.02);
 
     const body = obj.body;
     body.type = CANNON.Body.KINEMATIC;
     body.mass = 0;
     body.updateMassProperties();
-    body.position.set(x, y, z);
+    body.position.set(clamped.x, y, clamped.z);
     body.quaternion.setFromEuler(0, yaw, 0);
     body.velocity.set(0, 0, 0);
     body.angularVelocity.set(0, 0, 0);
@@ -1313,6 +1317,7 @@ function resize() {
   setFixedCamera();
   camera.updateProjectionMatrix();
   renderer.setSize(width, height);
+  applyAsideLayout();
 }
 
 visualizeForm.addEventListener("submit", queueFromAmount);
