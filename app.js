@@ -31,6 +31,8 @@ const DRAG_LIFT_HEIGHT = 0.12;
 const DRAG_START_PIXELS = 8;
 const TABLE_PAN_START_PIXELS = 6;
 const DRAG_FOLLOW_RATE = 26;
+const DRAG_RELEASE_VELOCITY_SMOOTH = 0.36;
+const DRAG_RELEASE_MAX_SPEED = 4.6;
 const CAMERA_PAN_FOLLOW_RATE = 18;
 const DOUBLE_TAP_INTERVAL_MS = 280;
 const DOUBLE_TAP_MAX_DISTANCE = 28;
@@ -183,7 +185,9 @@ const dragState = {
   originalMass: 0,
   targetX: 0,
   targetZ: 0,
-  hasTarget: false
+  hasTarget: false,
+  releaseVx: 0,
+  releaseVz: 0
 };
 const gestureState = {
   active: false,
@@ -1552,14 +1556,27 @@ function applyDraggedBodyFollow(delta) {
   const follow = 1 - Math.exp(-DRAG_FOLLOW_RATE * delta);
   const nextX = THREE.MathUtils.lerp(body.position.x, dragState.targetX, follow);
   const nextZ = THREE.MathUtils.lerp(body.position.z, dragState.targetZ, follow);
+  const vx = (nextX - body.position.x) / FIXED_TIMESTEP;
+  const vz = (nextZ - body.position.z) / FIXED_TIMESTEP;
 
   body.velocity.set(
-    (nextX - body.position.x) / FIXED_TIMESTEP,
+    vx,
     0,
-    (nextZ - body.position.z) / FIXED_TIMESTEP
+    vz
   );
   body.position.set(nextX, dragState.dragHeight, nextZ);
   body.angularVelocity.set(0, 0, 0);
+
+  dragState.releaseVx = THREE.MathUtils.lerp(
+    dragState.releaseVx,
+    vx,
+    DRAG_RELEASE_VELOCITY_SMOOTH
+  );
+  dragState.releaseVz = THREE.MathUtils.lerp(
+    dragState.releaseVz,
+    vz,
+    DRAG_RELEASE_VELOCITY_SMOOTH
+  );
 }
 
 function applyCameraPanFollow(delta) {
@@ -1582,8 +1599,10 @@ function finishDragging() {
   body.type = CANNON.Body.DYNAMIC;
   body.mass = dragState.originalMass;
   body.updateMassProperties();
-  body.velocity.set(0, -0.04, 0);
-  body.angularVelocity.set(0, 0, 0);
+  const vx = THREE.MathUtils.clamp(dragState.releaseVx, -DRAG_RELEASE_MAX_SPEED, DRAG_RELEASE_MAX_SPEED);
+  const vz = THREE.MathUtils.clamp(dragState.releaseVz, -DRAG_RELEASE_MAX_SPEED, DRAG_RELEASE_MAX_SPEED);
+  body.velocity.set(vx, -0.04, vz);
+  body.angularVelocity.set(-vz * 0.08, 0, vx * 0.08);
   body.wakeUp();
 
   if (dragState.pointerId !== null && viewport.hasPointerCapture(dragState.pointerId)) {
@@ -1600,6 +1619,8 @@ function finishDragging() {
   dragState.targetX = 0;
   dragState.targetZ = 0;
   dragState.hasTarget = false;
+  dragState.releaseVx = 0;
+  dragState.releaseVz = 0;
   viewport.style.cursor = "";
 }
 
@@ -1640,6 +1661,8 @@ function startDraggingFromPicked(picked, event) {
   dragState.targetX = body.position.x;
   dragState.targetZ = body.position.z;
   dragState.hasTarget = true;
+  dragState.releaseVx = 0;
+  dragState.releaseVz = 0;
 
   viewport.style.cursor = "grabbing";
   updateDraggedBodyTarget(event);
