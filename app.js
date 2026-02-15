@@ -25,13 +25,26 @@ const DRAG_FOLLOW_RATE = 26;
 const CAMERA_PAN_FOLLOW_RATE = 18;
 const DOUBLE_TAP_INTERVAL_MS = 280;
 const DOUBLE_TAP_MAX_DISTANCE = 28;
-const ASIDE_COLS_DESKTOP = 6;
-const ASIDE_COLS_MOBILE = 4;
-const ASIDE_ROWS = 16;
-const ASIDE_COL_STEP = 0.31;
-const ASIDE_ROW_STEP = 0.22;
-const ASIDE_LAYER_STEP = 0.09;
-const ASIDE_TOP_Z = -INTERACTION_BOUNDS_HALF + 0.55;
+const ASIDE_COLS_DESKTOP = 2;
+const ASIDE_COLS_MOBILE = 2;
+const ASIDE_ROWS = 2;
+const ASIDE_LAYER_STEP = 0.07;
+const SELECTED_DROP_HEIGHT = 0.17;
+const SELECTED_RELOCATE_DISTANCE = 0.32;
+const SELECTED_GUIDE_STIFFNESS = 2.8;
+const SELECTED_GUIDE_DAMPING = 0.7;
+const SELECTED_MAX_GUIDE_FORCE = 0.72;
+
+const PAYMENT_TRAY_CENTER_X = 0;
+const PAYMENT_TRAY_WIDTH = 2.35;
+const PAYMENT_TRAY_DEPTH = 1.1;
+const PAYMENT_TRAY_BASE_THICKNESS = 0.018;
+const PAYMENT_TRAY_RIM_THICKNESS = 0.08;
+const PAYMENT_TRAY_WALL_HEIGHT = 0.065;
+const PAYMENT_TRAY_INNER_PADDING = 0.12;
+const PAYMENT_TRAY_CENTER_Z =
+  -INTERACTION_BOUNDS_HALF + PAYMENT_TRAY_DEPTH * 0.5 + PAYMENT_TRAY_RIM_THICKNESS + 0.14;
+const ASIDE_BASE_Y = PAYMENT_TRAY_BASE_THICKNESS + 0.014;
 
 const TABLE_RENDER_SIZE = 120;
 const CAMERA_BASE_POS = new THREE.Vector3(0, 5.8, 4.9);
@@ -219,6 +232,7 @@ const cameraTarget = new THREE.Vector3();
 const panStartTablePoint = new THREE.Vector3();
 const panStartCameraOffset = new THREE.Vector3();
 const panDelta = new THREE.Vector3();
+const selectedGuideForce = new CANNON.Vec3();
 const textureCache = new Map();
 const billMaterialCache = new Map();
 const billGeometryCache = new Map();
@@ -264,6 +278,82 @@ tableTop.position.y = 0;
 tableTop.receiveShadow = true;
 scene.add(tableTop);
 
+function addPaymentTrayVisual() {
+  const trayBaseMat = new THREE.MeshStandardMaterial({
+    color: 0x3f72bf,
+    roughness: 0.43,
+    metalness: 0.12
+  });
+  const trayInnerMat = new THREE.MeshStandardMaterial({
+    color: 0x4f86d9,
+    roughness: 0.37,
+    metalness: 0.08
+  });
+  const trayRimMat = new THREE.MeshStandardMaterial({
+    color: 0x2f5ca6,
+    roughness: 0.48,
+    metalness: 0.14
+  });
+
+  const base = new THREE.Mesh(
+    new THREE.BoxGeometry(PAYMENT_TRAY_WIDTH, PAYMENT_TRAY_BASE_THICKNESS, PAYMENT_TRAY_DEPTH),
+    trayBaseMat
+  );
+  base.position.set(
+    PAYMENT_TRAY_CENTER_X,
+    PAYMENT_TRAY_BASE_THICKNESS * 0.5,
+    PAYMENT_TRAY_CENTER_Z
+  );
+  base.castShadow = true;
+  base.receiveShadow = true;
+  scene.add(base);
+
+  const innerWidth = PAYMENT_TRAY_WIDTH - PAYMENT_TRAY_RIM_THICKNESS * 2;
+  const innerDepth = PAYMENT_TRAY_DEPTH - PAYMENT_TRAY_RIM_THICKNESS * 2;
+  const inner = new THREE.Mesh(
+    new THREE.BoxGeometry(innerWidth, 0.008, innerDepth),
+    trayInnerMat
+  );
+  inner.position.set(
+    PAYMENT_TRAY_CENTER_X,
+    PAYMENT_TRAY_BASE_THICKNESS + 0.004,
+    PAYMENT_TRAY_CENTER_Z
+  );
+  inner.receiveShadow = true;
+  scene.add(inner);
+
+  const wallY = PAYMENT_TRAY_BASE_THICKNESS + PAYMENT_TRAY_WALL_HEIGHT * 0.5;
+  const zOffset = PAYMENT_TRAY_DEPTH * 0.5 - PAYMENT_TRAY_RIM_THICKNESS * 0.5;
+  const xOffset = PAYMENT_TRAY_WIDTH * 0.5 - PAYMENT_TRAY_RIM_THICKNESS * 0.5;
+
+  const walls = [
+    {
+      size: [PAYMENT_TRAY_WIDTH, PAYMENT_TRAY_WALL_HEIGHT, PAYMENT_TRAY_RIM_THICKNESS],
+      position: [PAYMENT_TRAY_CENTER_X, wallY, PAYMENT_TRAY_CENTER_Z + zOffset]
+    },
+    {
+      size: [PAYMENT_TRAY_WIDTH, PAYMENT_TRAY_WALL_HEIGHT, PAYMENT_TRAY_RIM_THICKNESS],
+      position: [PAYMENT_TRAY_CENTER_X, wallY, PAYMENT_TRAY_CENTER_Z - zOffset]
+    },
+    {
+      size: [PAYMENT_TRAY_RIM_THICKNESS, PAYMENT_TRAY_WALL_HEIGHT, PAYMENT_TRAY_DEPTH],
+      position: [PAYMENT_TRAY_CENTER_X + xOffset, wallY, PAYMENT_TRAY_CENTER_Z]
+    },
+    {
+      size: [PAYMENT_TRAY_RIM_THICKNESS, PAYMENT_TRAY_WALL_HEIGHT, PAYMENT_TRAY_DEPTH],
+      position: [PAYMENT_TRAY_CENTER_X - xOffset, wallY, PAYMENT_TRAY_CENTER_Z]
+    }
+  ];
+
+  for (const wall of walls) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(...wall.size), trayRimMat);
+    mesh.position.set(...wall.position);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+  }
+}
+
 const world = new CANNON.World();
 world.gravity.set(0, -14, 0);
 world.allowSleep = true;
@@ -294,6 +384,77 @@ tableBody.addShape(new CANNON.Plane());
 tableBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
 tableBody.position.set(0, 0, 0);
 world.addBody(tableBody);
+
+function addPaymentTrayPhysics() {
+  const baseBody = new CANNON.Body({
+    mass: 0,
+    material: tableMaterial
+  });
+  baseBody.addShape(
+    new CANNON.Box(
+      new CANNON.Vec3(
+        PAYMENT_TRAY_WIDTH * 0.5,
+        PAYMENT_TRAY_BASE_THICKNESS * 0.5,
+        PAYMENT_TRAY_DEPTH * 0.5
+      )
+    )
+  );
+  baseBody.position.set(
+    PAYMENT_TRAY_CENTER_X,
+    PAYMENT_TRAY_BASE_THICKNESS * 0.5,
+    PAYMENT_TRAY_CENTER_Z
+  );
+  world.addBody(baseBody);
+
+  const wallY = PAYMENT_TRAY_BASE_THICKNESS + PAYMENT_TRAY_WALL_HEIGHT * 0.5;
+  const zOffset = PAYMENT_TRAY_DEPTH * 0.5 - PAYMENT_TRAY_RIM_THICKNESS * 0.5;
+  const xOffset = PAYMENT_TRAY_WIDTH * 0.5 - PAYMENT_TRAY_RIM_THICKNESS * 0.5;
+
+  const walls = [
+    {
+      halfExtents: new CANNON.Vec3(
+        PAYMENT_TRAY_WIDTH * 0.5,
+        PAYMENT_TRAY_WALL_HEIGHT * 0.5,
+        PAYMENT_TRAY_RIM_THICKNESS * 0.5
+      ),
+      position: new CANNON.Vec3(PAYMENT_TRAY_CENTER_X, wallY, PAYMENT_TRAY_CENTER_Z + zOffset)
+    },
+    {
+      halfExtents: new CANNON.Vec3(
+        PAYMENT_TRAY_WIDTH * 0.5,
+        PAYMENT_TRAY_WALL_HEIGHT * 0.5,
+        PAYMENT_TRAY_RIM_THICKNESS * 0.5
+      ),
+      position: new CANNON.Vec3(PAYMENT_TRAY_CENTER_X, wallY, PAYMENT_TRAY_CENTER_Z - zOffset)
+    },
+    {
+      halfExtents: new CANNON.Vec3(
+        PAYMENT_TRAY_RIM_THICKNESS * 0.5,
+        PAYMENT_TRAY_WALL_HEIGHT * 0.5,
+        PAYMENT_TRAY_DEPTH * 0.5
+      ),
+      position: new CANNON.Vec3(PAYMENT_TRAY_CENTER_X + xOffset, wallY, PAYMENT_TRAY_CENTER_Z)
+    },
+    {
+      halfExtents: new CANNON.Vec3(
+        PAYMENT_TRAY_RIM_THICKNESS * 0.5,
+        PAYMENT_TRAY_WALL_HEIGHT * 0.5,
+        PAYMENT_TRAY_DEPTH * 0.5
+      ),
+      position: new CANNON.Vec3(PAYMENT_TRAY_CENTER_X - xOffset, wallY, PAYMENT_TRAY_CENTER_Z)
+    }
+  ];
+
+  for (const wall of walls) {
+    const wallBody = new CANNON.Body({
+      mass: 0,
+      material: tableMaterial
+    });
+    wallBody.addShape(new CANNON.Box(wall.halfExtents));
+    wallBody.position.copy(wall.position);
+    world.addBody(wallBody);
+  }
+}
 
 function addInvisibleBoundsWalls() {
   const wallHeight = 3.6;
@@ -331,6 +492,8 @@ function addInvisibleBoundsWalls() {
   }
 }
 
+addPaymentTrayVisual();
+addPaymentTrayPhysics();
 addInvisibleBoundsWalls();
 
 function makeBillGeometry(width, depth) {
@@ -685,7 +848,14 @@ function updateSelectedTotalOverlay() {
 
 function applyAsideLayout() {
   const cols = window.innerWidth <= 720 ? ASIDE_COLS_MOBILE : ASIDE_COLS_DESKTOP;
-  const xStart = -((cols - 1) * ASIDE_COL_STEP) * 0.5;
+  const innerWidth =
+    PAYMENT_TRAY_WIDTH - PAYMENT_TRAY_RIM_THICKNESS * 2 - PAYMENT_TRAY_INNER_PADDING * 2;
+  const innerDepth =
+    PAYMENT_TRAY_DEPTH - PAYMENT_TRAY_RIM_THICKNESS * 2 - PAYMENT_TRAY_INNER_PADDING * 2;
+  const colStep = cols > 1 ? innerWidth / (cols - 1) : 0;
+  const rowStep = ASIDE_ROWS > 1 ? innerDepth / (ASIDE_ROWS - 1) : 0;
+  const xStart = PAYMENT_TRAY_CENTER_X - innerWidth * 0.5;
+  const zStart = PAYMENT_TRAY_CENTER_Z - innerDepth * 0.5;
 
   for (let i = 0; i < selectedObjects.length; i += 1) {
     const obj = selectedObjects[i];
@@ -694,20 +864,43 @@ function applyAsideLayout() {
     const col = slot % cols;
     const row = Math.floor(slot / cols);
 
-    const rawX = xStart + col * ASIDE_COL_STEP;
-    const rawZ = ASIDE_TOP_Z + row * ASIDE_ROW_STEP;
+    const rawX = xStart + col * colStep;
+    const rawZ = zStart + row * rowStep;
     const clamped = clampToBounds(rawX, rawZ, 0.24);
-    const y = 0.03 + layer * ASIDE_LAYER_STEP;
-    const yaw = (col - (cols - 1) * 0.5) * 0.05 + (row % 2 === 0 ? -0.02 : 0.02);
+    const y = ASIDE_BASE_Y + layer * ASIDE_LAYER_STEP;
+    const yaw = obj.kind === "bill" ? 0 : (col - (cols - 1) * 0.5) * 0.08;
 
     const body = obj.body;
-    body.type = CANNON.Body.KINEMATIC;
-    body.mass = 0;
+    body.type = CANNON.Body.DYNAMIC;
+    body.mass = obj.originalMass;
     body.updateMassProperties();
-    body.position.set(clamped.x, y, clamped.z);
-    body.quaternion.setFromEuler(0, yaw, 0);
-    body.velocity.set(0, 0, 0);
-    body.angularVelocity.set(0, 0, 0);
+    body.linearDamping = Math.max(obj.originalLinearDamping, obj.kind === "bill" ? 0.4 : 0.28);
+    body.angularDamping = Math.max(obj.originalAngularDamping, obj.kind === "bill" ? 0.5 : 0.22);
+
+    obj.selectedTarget = {
+      x: clamped.x,
+      y,
+      z: clamped.z,
+      yaw
+    };
+
+    const dx = body.position.x - clamped.x;
+    const dz = body.position.z - clamped.z;
+    const farFromSlot = dx * dx + dz * dz > SELECTED_RELOCATE_DISTANCE * SELECTED_RELOCATE_DISTANCE;
+    const tooLow = body.position.y < ASIDE_BASE_Y + 0.004;
+    if (obj.needsTrayDrop || farFromSlot || tooLow) {
+      const jitterX = (Math.random() - 0.5) * 0.035;
+      const jitterZ = (Math.random() - 0.5) * 0.035;
+      body.position.set(clamped.x + jitterX, y + SELECTED_DROP_HEIGHT, clamped.z + jitterZ);
+      body.quaternion.setFromEuler(0, yaw, 0);
+      body.velocity.set(0, -0.08, 0);
+      body.angularVelocity.set(
+        (Math.random() - 0.5) * (obj.kind === "bill" ? 0.22 : 0.42),
+        (Math.random() - 0.5) * (obj.kind === "bill" ? 0.08 : 0.34),
+        (Math.random() - 0.5) * (obj.kind === "bill" ? 0.22 : 0.42)
+      );
+    }
+    obj.needsTrayDrop = false;
     body.wakeUp();
   }
 }
@@ -721,6 +914,7 @@ function selectCashObject(obj) {
     quaternion: obj.body.quaternion.clone()
   };
   obj.isSelected = true;
+  obj.needsTrayDrop = true;
   selectedObjects.push(obj);
   applyAsideLayout();
   updateSelectedTotalOverlay();
@@ -737,10 +931,14 @@ function deselectCashObject(obj) {
   }
 
   obj.isSelected = false;
+  obj.selectedTarget = null;
+  obj.needsTrayDrop = false;
   const body = obj.body;
   body.type = CANNON.Body.DYNAMIC;
   body.mass = obj.originalMass;
   body.updateMassProperties();
+  body.linearDamping = obj.originalLinearDamping;
+  body.angularDamping = obj.originalAngularDamping;
 
   const savedPos = obj.savedPose?.position ?? body.position;
   const savedQuat = obj.savedPose?.quaternion ?? body.quaternion;
@@ -811,8 +1009,12 @@ function spawnCash(entry, options = null) {
   obj.denomination = denomination;
   obj.representedValue = representedValue;
   obj.originalMass = body.mass;
+  obj.originalLinearDamping = body.linearDamping;
+  obj.originalAngularDamping = body.angularDamping;
   obj.isSelected = false;
   obj.savedPose = null;
+  obj.selectedTarget = null;
+  obj.needsTrayDrop = false;
   scene.add(mesh);
   world.addBody(body);
   cashObjects.push(obj);
@@ -827,6 +1029,8 @@ function removeCashObject(target) {
     }
     target.isSelected = false;
     target.savedPose = null;
+    target.selectedTarget = null;
+    target.needsTrayDrop = false;
   }
 
   const idx = cashObjects.indexOf(target);
@@ -1110,6 +1314,36 @@ function applyCameraPanFollow(delta) {
   const moved = Math.abs(cameraOffset.x - beforeX) > 1e-4 || Math.abs(cameraOffset.z - beforeZ) > 1e-4;
   if (moved) {
     setFixedCamera();
+  }
+}
+
+function applySelectedTrayGuidance() {
+  if (selectedObjects.length === 0) {
+    return;
+  }
+
+  for (const obj of selectedObjects) {
+    if (!obj.selectedTarget) {
+      continue;
+    }
+
+    const body = obj.body;
+    const dx = obj.selectedTarget.x - body.position.x;
+    const dz = obj.selectedTarget.z - body.position.z;
+    const fx = (dx * SELECTED_GUIDE_STIFFNESS - body.velocity.x * SELECTED_GUIDE_DAMPING) * body.mass;
+    const fz = (dz * SELECTED_GUIDE_STIFFNESS - body.velocity.z * SELECTED_GUIDE_DAMPING) * body.mass;
+
+    selectedGuideForce.set(fx, 0, fz);
+    const fLen = selectedGuideForce.length();
+    const maxForce = SELECTED_MAX_GUIDE_FORCE * body.mass;
+    if (fLen > maxForce && fLen > 1e-6) {
+      selectedGuideForce.scale(maxForce / fLen, selectedGuideForce);
+    }
+
+    body.applyForce(selectedGuideForce, body.position);
+    if (dx * dx + dz * dz > 0.0009) {
+      body.wakeUp();
+    }
   }
 }
 
@@ -1484,6 +1718,7 @@ function tick() {
 
   applyDraggedBodyFollow(delta);
   applyCameraPanFollow(delta);
+  applySelectedTrayGuidance();
 
   world.step(FIXED_TIMESTEP, delta, MAX_SUBSTEPS);
   syncMeshesFromPhysics();
