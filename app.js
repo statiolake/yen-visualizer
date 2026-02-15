@@ -610,7 +610,8 @@ function parseAmount(raw) {
   }
 
   const bundleSize = Math.max(1, Math.ceil(totalItems / MAX_VISUAL_ITEMS));
-  const itemQueue = [];
+  const billQueue = [];
+  const coinQueue = [];
   let representedAmount = 0;
 
   for (const entry of denominationCounts) {
@@ -619,20 +620,34 @@ function parseAmount(raw) {
     }
     const visualCount = Math.ceil(entry.count / bundleSize);
     for (let i = 0; i < visualCount; i += 1) {
-      itemQueue.push({
+      const item = {
         denomination: entry.denomination,
         representedValue: entry.denomination.value * bundleSize
-      });
+      };
+      if (entry.denomination.kind === "bill") {
+        billQueue.push(item);
+      } else {
+        coinQueue.push(item);
+      }
       representedAmount += entry.denomination.value * bundleSize;
     }
   }
 
-  for (let i = itemQueue.length - 1; i > 0; i -= 1) {
+  // Keep natural variation while preserving group order: bills first, coins later.
+  for (let i = billQueue.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
-    const t = itemQueue[i];
-    itemQueue[i] = itemQueue[j];
-    itemQueue[j] = t;
+    const t = billQueue[i];
+    billQueue[i] = billQueue[j];
+    billQueue[j] = t;
   }
+  for (let i = coinQueue.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = coinQueue[i];
+    coinQueue[i] = coinQueue[j];
+    coinQueue[j] = t;
+  }
+
+  const itemQueue = billQueue.concat(coinQueue);
 
   return {
     original,
@@ -737,7 +752,7 @@ function tick() {
 
   if (running && pendingQueue.length > 0 && spawnAccumulator >= SPAWN_INTERVAL) {
     spawnAccumulator = 0;
-    const next = pendingQueue.pop();
+    const next = pendingQueue.shift();
     spawnCash(next);
   }
 
