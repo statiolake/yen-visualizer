@@ -228,11 +228,21 @@ canvas {
     top: 12px;
     width: calc(100% - 24px);
     padding: 8px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 10px;
   }
 
   input {
     width: 100%;
     min-width: 0;
+  }
+
+  #dropButton {
+    min-width: 92px;
+    padding: 10px 16px;
+    font-size: 1rem;
+    white-space: nowrap;
   }
 
   .selected-total {

@@ -2012,6 +2012,11 @@ async function initAssets() {
     await preloadTextures();
     assetsReady = true;
     dropButton.disabled = gameState.active;
+
+    const initialAmount = Number(amountInput.value);
+    if (Number.isFinite(initialAmount) && initialAmount > 0 && !gameState.active) {
+      queueFromAmount();
+    }
   } catch (error) {
     console.error(error);
     assetsReady = false;
