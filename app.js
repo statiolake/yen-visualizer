@@ -14,6 +14,8 @@ const DEFAULT_BILL_ASPECT = NOTE_WIDTH / NOTE_DEPTH;
 const DROP_HEIGHT = 4.25;
 const DROP_RADIUS = 1.45;
 const MAX_VISUAL_ITEMS = 480;
+const INTERACTION_BOUNDS_HALF = 2.9;
+const DRAG_LIFT_HEIGHT = 0.12;
 
 const TABLE_RENDER_SIZE = 120;
 const CAMERA_POS = new THREE.Vector3(0, 5.8, 4.9);
@@ -130,6 +132,15 @@ const EXCHANGE_TARGET_BY_VALUE = new Map([
 const cashObjects = [];
 const cashByMeshId = new Map();
 const pendingQueue = [];
+const dragState = {
+  active: false,
+  pointerId: null,
+  obj: null,
+  dragHeight: 0,
+  grabOffsetX: 0,
+  grabOffsetZ: 0,
+  originalMass: 0
+};
 
 let spawnAccumulator = 0;
 let settleAccumulator = 0;
@@ -154,6 +165,8 @@ viewport.appendChild(renderer.domElement);
 const textureLoader = new THREE.TextureLoader();
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
+const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const dragPoint = new THREE.Vector3();
 const textureCache = new Map();
 const billMaterialCache = new Map();
 const billGeometryCache = new Map();
@@ -228,6 +241,44 @@ tableBody.addShape(new CANNON.Plane());
 tableBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
 tableBody.position.set(0, 0, 0);
 world.addBody(tableBody);
+
+function addInvisibleBoundsWalls() {
+  const wallHeight = 3.6;
+  const wallThickness = 0.18;
+  const h = INTERACTION_BOUNDS_HALF;
+  const y = wallHeight * 0.5;
+
+  const walls = [
+    {
+      halfExtents: new CANNON.Vec3(h + wallThickness * 0.5, wallHeight * 0.5, wallThickness * 0.5),
+      position: new CANNON.Vec3(0, y, h + wallThickness * 0.5)
+    },
+    {
+      halfExtents: new CANNON.Vec3(h + wallThickness * 0.5, wallHeight * 0.5, wallThickness * 0.5),
+      position: new CANNON.Vec3(0, y, -h - wallThickness * 0.5)
+    },
+    {
+      halfExtents: new CANNON.Vec3(wallThickness * 0.5, wallHeight * 0.5, h + wallThickness * 0.5),
+      position: new CANNON.Vec3(h + wallThickness * 0.5, y, 0)
+    },
+    {
+      halfExtents: new CANNON.Vec3(wallThickness * 0.5, wallHeight * 0.5, h + wallThickness * 0.5),
+      position: new CANNON.Vec3(-h - wallThickness * 0.5, y, 0)
+    }
+  ];
+
+  for (const wall of walls) {
+    const wallBody = new CANNON.Body({
+      mass: 0,
+      material: tableMaterial
+    });
+    wallBody.addShape(new CANNON.Box(wall.halfExtents));
+    wallBody.position.copy(wall.position);
+    world.addBody(wallBody);
+  }
+}
+
+addInvisibleBoundsWalls();
 
 function makeBillGeometry(width, depth) {
   const geometry = new THREE.BoxGeometry(width, NOTE_THICKNESS, depth, 8, 1, 4);
@@ -547,6 +598,15 @@ function randomDropTarget() {
   };
 }
 
+function clampToBounds(x, z, margin = 0.04) {
+  const min = -INTERACTION_BOUNDS_HALF + margin;
+  const max = INTERACTION_BOUNDS_HALF - margin;
+  return {
+    x: THREE.MathUtils.clamp(x, min, max),
+    z: THREE.MathUtils.clamp(z, min, max)
+  };
+}
+
 function spawnCash(entry, options = null) {
   const { denomination } = entry;
   const representedValue = entry.representedValue ?? denomination.value;
@@ -558,8 +618,11 @@ function spawnCash(entry, options = null) {
 
   const target = randomDropTarget();
   const drift = kind === "bill" ? 0.55 : 0.38;
-  const startX = options?.position?.x ?? (target.x + (Math.random() - 0.5) * drift);
-  const startZ = options?.position?.z ?? (target.z + (Math.random() - 0.5) * drift);
+  const unclampedX = options?.position?.x ?? (target.x + (Math.random() - 0.5) * drift);
+  const unclampedZ = options?.position?.z ?? (target.z + (Math.random() - 0.5) * drift);
+  const clamped = clampToBounds(unclampedX, unclampedZ);
+  const startX = clamped.x;
+  const startZ = clamped.z;
   const startY = options?.position?.y ?? (DROP_HEIGHT + Math.random() * 1.1);
 
   const euler = new THREE.Euler(
@@ -772,6 +835,7 @@ function queueFromAmount(event) {
 }
 
 function clearAll() {
+  finishDragging();
   pendingQueue.length = 0;
 
   for (let i = cashObjects.length - 1; i >= 0; i -= 1) {
@@ -783,28 +847,146 @@ function clearAll() {
   settleAccumulator = 0;
 }
 
-function onViewportContextMenu(event) {
-  event.preventDefault();
-  if (!assetsReady || cashObjects.length === 0) {
-    return;
-  }
-
+function setPointerFromEvent(event) {
   const rect = viewport.getBoundingClientRect();
   pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+}
 
+function pickCashFromEvent(event) {
+  if (cashObjects.length === 0) {
+    return null;
+  }
+  setPointerFromEvent(event);
   raycaster.setFromCamera(pointer, camera);
   const hit = raycaster.intersectObjects(cashObjects.map((o) => o.mesh), false)[0];
   if (!hit) {
+    return null;
+  }
+  const obj = cashByMeshId.get(hit.object.id);
+  if (!obj) {
+    return null;
+  }
+  return { hit, obj };
+}
+
+function getDragPlanePoint(event, y) {
+  setPointerFromEvent(event);
+  raycaster.setFromCamera(pointer, camera);
+  dragPlane.constant = -y;
+  const ok = raycaster.ray.intersectPlane(dragPlane, dragPoint);
+  return ok ? dragPoint : null;
+}
+
+function updateDraggedBodyPosition(event) {
+  if (!dragState.active || !dragState.obj) {
+    return;
+  }
+  const p = getDragPlanePoint(event, dragState.dragHeight);
+  if (!p) {
     return;
   }
 
-  const target = cashByMeshId.get(hit.object.id);
-  if (!target) {
+  const desiredX = p.x - dragState.grabOffsetX;
+  const desiredZ = p.z - dragState.grabOffsetZ;
+  const clamped = clampToBounds(desiredX, desiredZ, 0.12);
+
+  const body = dragState.obj.body;
+  body.position.set(clamped.x, dragState.dragHeight, clamped.z);
+  body.velocity.set(0, 0, 0);
+  body.angularVelocity.set(0, 0, 0);
+}
+
+function finishDragging() {
+  if (!dragState.active || !dragState.obj) {
     return;
   }
 
-  exchangeCashObject(target);
+  const body = dragState.obj.body;
+  body.type = CANNON.Body.DYNAMIC;
+  body.mass = dragState.originalMass;
+  body.updateMassProperties();
+  body.velocity.set(0, -0.04, 0);
+  body.angularVelocity.set(0, 0, 0);
+  body.wakeUp();
+
+  if (dragState.pointerId !== null && viewport.hasPointerCapture(dragState.pointerId)) {
+    viewport.releasePointerCapture(dragState.pointerId);
+  }
+
+  dragState.active = false;
+  dragState.pointerId = null;
+  dragState.obj = null;
+  dragState.dragHeight = 0;
+  dragState.grabOffsetX = 0;
+  dragState.grabOffsetZ = 0;
+  dragState.originalMass = 0;
+  viewport.style.cursor = "";
+}
+
+function onViewportPointerDown(event) {
+  if (event.button !== 0 || !assetsReady || dragState.active) {
+    return;
+  }
+
+  const picked = pickCashFromEvent(event);
+  if (!picked) {
+    return;
+  }
+
+  event.preventDefault();
+  viewport.setPointerCapture(event.pointerId);
+
+  const { hit, obj } = picked;
+  const body = obj.body;
+  body.wakeUp();
+
+  dragState.active = true;
+  dragState.pointerId = event.pointerId;
+  dragState.obj = obj;
+  dragState.dragHeight = Math.max(body.position.y + DRAG_LIFT_HEIGHT, 0.06);
+  dragState.grabOffsetX = hit.point.x - body.position.x;
+  dragState.grabOffsetZ = hit.point.z - body.position.z;
+  dragState.originalMass = body.mass;
+
+  body.type = CANNON.Body.KINEMATIC;
+  body.mass = 0;
+  body.updateMassProperties();
+  body.velocity.set(0, 0, 0);
+  body.angularVelocity.set(0, 0, 0);
+
+  viewport.style.cursor = "grabbing";
+  updateDraggedBodyPosition(event);
+}
+
+function onViewportPointerMove(event) {
+  if (!dragState.active || event.pointerId !== dragState.pointerId) {
+    return;
+  }
+  event.preventDefault();
+  updateDraggedBodyPosition(event);
+}
+
+function onViewportPointerUp(event) {
+  if (!dragState.active || event.pointerId !== dragState.pointerId) {
+    return;
+  }
+  event.preventDefault();
+  finishDragging();
+}
+
+function onViewportContextMenu(event) {
+  event.preventDefault();
+  if (!assetsReady || cashObjects.length === 0 || dragState.active) {
+    return;
+  }
+
+  const picked = pickCashFromEvent(event);
+  if (!picked) {
+    return;
+  }
+
+  exchangeCashObject(picked.obj);
 }
 
 function isBodySettled(body) {
@@ -841,6 +1023,10 @@ function resize() {
 }
 
 visualizeForm.addEventListener("submit", queueFromAmount);
+viewport.addEventListener("pointerdown", onViewportPointerDown);
+viewport.addEventListener("pointermove", onViewportPointerMove);
+viewport.addEventListener("pointerup", onViewportPointerUp);
+viewport.addEventListener("pointercancel", onViewportPointerUp);
 viewport.addEventListener("contextmenu", onViewportContextMenu);
 window.addEventListener("resize", resize);
 resize();
