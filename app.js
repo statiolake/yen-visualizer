@@ -20,6 +20,9 @@ const MAX_VISUAL_ITEMS = 480;
 const INTERACTION_BOUNDS_HALF = 2.9;
 const DRAG_LIFT_HEIGHT = 0.12;
 const DRAG_START_PIXELS = 8;
+const TABLE_PAN_START_PIXELS = 6;
+const DRAG_FOLLOW_RATE = 26;
+const CAMERA_PAN_FOLLOW_RATE = 18;
 const DOUBLE_TAP_INTERVAL_MS = 280;
 const DOUBLE_TAP_MAX_DISTANCE = 28;
 const ASIDE_COLS_DESKTOP = 6;
@@ -31,8 +34,10 @@ const ASIDE_LAYER_STEP = 0.09;
 const ASIDE_TOP_Z = -INTERACTION_BOUNDS_HALF + 0.55;
 
 const TABLE_RENDER_SIZE = 120;
-const CAMERA_POS = new THREE.Vector3(0, 5.8, 4.9);
-const CAMERA_TARGET = new THREE.Vector3(0, 0.28, 0);
+const CAMERA_BASE_POS = new THREE.Vector3(0, 5.8, 4.9);
+const CAMERA_BASE_TARGET = new THREE.Vector3(0, 0.28, 0);
+const CAMERA_PAN_LIMIT_X = 1.6;
+const CAMERA_PAN_LIMIT_Z = 1.25;
 
 const SPAWN_INTERVAL = 0.04;
 const FIXED_TIMESTEP = 1 / 60;
@@ -153,7 +158,10 @@ const dragState = {
   dragHeight: 0,
   grabOffsetX: 0,
   grabOffsetZ: 0,
-  originalMass: 0
+  originalMass: 0,
+  targetX: 0,
+  targetZ: 0,
+  hasTarget: false
 };
 const gestureState = {
   active: false,
@@ -162,6 +170,13 @@ const gestureState = {
   startY: 0,
   picked: null,
   dragStarted: false
+};
+const panState = {
+  active: false,
+  pointerId: null,
+  startX: 0,
+  startY: 0,
+  moved: false
 };
 const tapState = {
   timerId: null,
@@ -196,6 +211,14 @@ const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const dragPoint = new THREE.Vector3();
+const tablePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const tablePoint = new THREE.Vector3();
+const cameraOffset = new THREE.Vector3(0, 0, 0);
+const cameraOffsetTarget = new THREE.Vector3(0, 0, 0);
+const cameraTarget = new THREE.Vector3();
+const panStartTablePoint = new THREE.Vector3();
+const panStartCameraOffset = new THREE.Vector3();
+const panDelta = new THREE.Vector3();
 const textureCache = new Map();
 const billMaterialCache = new Map();
 const billGeometryCache = new Map();
@@ -203,8 +226,9 @@ const coinMaterialCache = new Map();
 const coinGeometryCache = new Map();
 
 function setFixedCamera() {
-  camera.position.copy(CAMERA_POS);
-  camera.lookAt(CAMERA_TARGET);
+  camera.position.copy(CAMERA_BASE_POS).add(cameraOffset);
+  cameraTarget.copy(CAMERA_BASE_TARGET).add(cameraOffset);
+  camera.lookAt(cameraTarget);
 }
 
 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x5b6f63, 1.2);
@@ -982,8 +1006,12 @@ function queueFromAmount(event) {
 
 function clearAll() {
   finishDragging();
+  finishPanning();
   resetGesture();
   clearPendingTap();
+  cameraOffset.set(0, 0, 0);
+  cameraOffsetTarget.set(0, 0, 0);
+  setFixedCamera();
   pendingQueue.length = 0;
 
   for (let i = cashObjects.length - 1; i >= 0; i -= 1) {
@@ -1026,7 +1054,19 @@ function getDragPlanePoint(event, y) {
   return ok ? dragPoint : null;
 }
 
-function updateDraggedBodyPosition(event) {
+function getTablePlanePoint(event) {
+  setPointerFromEvent(event);
+  raycaster.setFromCamera(pointer, camera);
+  const ok = raycaster.ray.intersectPlane(tablePlane, tablePoint);
+  return ok ? tablePoint : null;
+}
+
+function clampCameraOffset(vec) {
+  vec.x = THREE.MathUtils.clamp(vec.x, -CAMERA_PAN_LIMIT_X, CAMERA_PAN_LIMIT_X);
+  vec.z = THREE.MathUtils.clamp(vec.z, -CAMERA_PAN_LIMIT_Z, CAMERA_PAN_LIMIT_Z);
+}
+
+function updateDraggedBodyTarget(event) {
   if (!dragState.active || !dragState.obj) {
     return;
   }
@@ -1038,11 +1078,39 @@ function updateDraggedBodyPosition(event) {
   const desiredX = p.x - dragState.grabOffsetX;
   const desiredZ = p.z - dragState.grabOffsetZ;
   const clamped = clampToBounds(desiredX, desiredZ, 0.12);
+  dragState.targetX = clamped.x;
+  dragState.targetZ = clamped.z;
+  dragState.hasTarget = true;
+}
+
+function applyDraggedBodyFollow(delta) {
+  if (!dragState.active || !dragState.obj || !dragState.hasTarget) {
+    return;
+  }
 
   const body = dragState.obj.body;
-  body.position.set(clamped.x, dragState.dragHeight, clamped.z);
-  body.velocity.set(0, 0, 0);
+  const follow = 1 - Math.exp(-DRAG_FOLLOW_RATE * delta);
+  const nextX = THREE.MathUtils.lerp(body.position.x, dragState.targetX, follow);
+  const nextZ = THREE.MathUtils.lerp(body.position.z, dragState.targetZ, follow);
+
+  body.velocity.set(
+    (nextX - body.position.x) / FIXED_TIMESTEP,
+    0,
+    (nextZ - body.position.z) / FIXED_TIMESTEP
+  );
+  body.position.set(nextX, dragState.dragHeight, nextZ);
   body.angularVelocity.set(0, 0, 0);
+}
+
+function applyCameraPanFollow(delta) {
+  const follow = 1 - Math.exp(-CAMERA_PAN_FOLLOW_RATE * delta);
+  const beforeX = cameraOffset.x;
+  const beforeZ = cameraOffset.z;
+  cameraOffset.lerp(cameraOffsetTarget, follow);
+  const moved = Math.abs(cameraOffset.x - beforeX) > 1e-4 || Math.abs(cameraOffset.z - beforeZ) > 1e-4;
+  if (moved) {
+    setFixedCamera();
+  }
 }
 
 function finishDragging() {
@@ -1069,7 +1137,26 @@ function finishDragging() {
   dragState.grabOffsetX = 0;
   dragState.grabOffsetZ = 0;
   dragState.originalMass = 0;
+  dragState.targetX = 0;
+  dragState.targetZ = 0;
+  dragState.hasTarget = false;
   viewport.style.cursor = "";
+}
+
+function finishPanning() {
+  if (!panState.active) {
+    return;
+  }
+
+  if (panState.pointerId !== null && viewport.hasPointerCapture(panState.pointerId)) {
+    viewport.releasePointerCapture(panState.pointerId);
+  }
+
+  panState.active = false;
+  panState.pointerId = null;
+  panState.startX = 0;
+  panState.startY = 0;
+  panState.moved = false;
 }
 
 function startDraggingFromPicked(picked, event) {
@@ -1090,9 +1177,12 @@ function startDraggingFromPicked(picked, event) {
   body.updateMassProperties();
   body.velocity.set(0, 0, 0);
   body.angularVelocity.set(0, 0, 0);
+  dragState.targetX = body.position.x;
+  dragState.targetZ = body.position.z;
+  dragState.hasTarget = true;
 
   viewport.style.cursor = "grabbing";
-  updateDraggedBodyPosition(event);
+  updateDraggedBodyTarget(event);
 }
 
 function resetGesture() {
@@ -1170,12 +1260,26 @@ function handleTapAction(event, obj) {
 }
 
 function onViewportPointerDown(event) {
-  if (event.button !== 0 || !assetsReady || dragState.active) {
+  if (event.button !== 0 || !assetsReady || dragState.active || panState.active) {
     return;
   }
 
   const picked = pickCashFromEvent(event);
   if (!picked) {
+    const p = getTablePlanePoint(event);
+    if (!p) {
+      return;
+    }
+    flushPendingTapSelection();
+    event.preventDefault();
+    viewport.setPointerCapture(event.pointerId);
+    panState.active = true;
+    panState.pointerId = event.pointerId;
+    panState.startX = event.clientX;
+    panState.startY = event.clientY;
+    panState.moved = false;
+    panStartTablePoint.copy(p);
+    panStartCameraOffset.copy(cameraOffsetTarget);
     return;
   }
 
@@ -1192,7 +1296,29 @@ function onViewportPointerDown(event) {
 function onViewportPointerMove(event) {
   if (dragState.active && event.pointerId === dragState.pointerId) {
     event.preventDefault();
-    updateDraggedBodyPosition(event);
+    updateDraggedBodyTarget(event);
+    return;
+  }
+
+  if (panState.active && event.pointerId === panState.pointerId) {
+    event.preventDefault();
+    const p = getTablePlanePoint(event);
+    if (!p) {
+      return;
+    }
+
+    if (!panState.moved) {
+      const dx = event.clientX - panState.startX;
+      const dy = event.clientY - panState.startY;
+      if (dx * dx + dy * dy < TABLE_PAN_START_PIXELS * TABLE_PAN_START_PIXELS) {
+        return;
+      }
+      panState.moved = true;
+    }
+
+    panDelta.copy(panStartTablePoint).sub(p);
+    cameraOffsetTarget.copy(panStartCameraOffset).add(panDelta);
+    clampCameraOffset(cameraOffsetTarget);
     return;
   }
 
@@ -1225,6 +1351,12 @@ function onViewportPointerUp(event) {
     return;
   }
 
+  if (panState.active && event.pointerId === panState.pointerId) {
+    event.preventDefault();
+    finishPanning();
+    return;
+  }
+
   if (!gestureState.active || event.pointerId !== gestureState.pointerId) {
     return;
   }
@@ -1243,6 +1375,10 @@ function onViewportPointerUp(event) {
 function onViewportPointerCancel(event) {
   if (dragState.active && event.pointerId === dragState.pointerId) {
     finishDragging();
+  }
+
+  if (panState.active && event.pointerId === panState.pointerId) {
+    finishPanning();
   }
 
   if (gestureState.active && event.pointerId === gestureState.pointerId) {
@@ -1314,6 +1450,9 @@ function resize() {
   const width = viewport.clientWidth;
   const height = viewport.clientHeight;
   camera.aspect = width / height;
+  clampCameraOffset(cameraOffsetTarget);
+  clampCameraOffset(cameraOffset);
+  cameraOffset.copy(cameraOffsetTarget);
   setFixedCamera();
   camera.updateProjectionMatrix();
   renderer.setSize(width, height);
@@ -1342,6 +1481,9 @@ function tick() {
     const next = pendingQueue.shift();
     spawnCash(next);
   }
+
+  applyDraggedBodyFollow(delta);
+  applyCameraPanFollow(delta);
 
   world.step(FIXED_TIMESTEP, delta, MAX_SUBSTEPS);
   syncMeshesFromPhysics();
