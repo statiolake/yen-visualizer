@@ -39,6 +39,10 @@ const DOUBLE_TAP_MAX_DISTANCE = 28;
 const PAYMENT_SHORTCUT_DROP_HEIGHT = 1.05;
 const PAYMENT_SHORTCUT_DROP_JITTER = 0;
 const PAYMENT_SHORTCUT_DOWN_VELOCITY = -0.12;
+const PAYOUT_REMOVE_DELAY_MS = 560;
+const PAYOUT_UPWARD_VELOCITY_MIN = 8.8;
+const PAYOUT_UPWARD_VELOCITY_MAX = 12.8;
+const PAYOUT_SIDE_VELOCITY = 3.4;
 const PAYMENT_TRAY_DETECT_MARGIN = 0.03;
 const PAYMENT_TRAY_DETECT_MAX_Y = 1.15;
 
@@ -175,6 +179,7 @@ const EXCHANGE_TARGET_BY_VALUE = new Map([
 const cashObjects = [];
 const cashByMeshId = new Map();
 const pendingQueue = [];
+const payoutRemovalQueue = [];
 const dragState = {
   active: false,
   pointerId: null,
@@ -1188,6 +1193,9 @@ function isInPaymentTrayBounds(x, z, margin = PAYMENT_TRAY_DETECT_MARGIN) {
 }
 
 function isCashInPaymentTray(obj) {
+  if (obj.isPayingOut) {
+    return false;
+  }
   if (dragState.active && dragState.obj === obj) {
     return false;
   }
@@ -1330,13 +1338,24 @@ function spawnCash(entry, options = null) {
   obj.originalMass = body.mass;
   obj.originalLinearDamping = body.linearDamping;
   obj.originalAngularDamping = body.angularDamping;
+  obj.isPayingOut = false;
   scene.add(mesh);
   world.addBody(body);
   cashObjects.push(obj);
   cashByMeshId.set(mesh.id, obj);
 }
 
+function dequeuePayoutRemoval(target) {
+  for (let i = payoutRemovalQueue.length - 1; i >= 0; i -= 1) {
+    if (payoutRemovalQueue[i].obj === target) {
+      payoutRemovalQueue.splice(i, 1);
+    }
+  }
+}
+
 function removeCashObject(target) {
+  dequeuePayoutRemoval(target);
+  target.isPayingOut = false;
   const idx = cashObjects.indexOf(target);
   if (idx >= 0) {
     cashObjects.splice(idx, 1);
@@ -1345,6 +1364,74 @@ function removeCashObject(target) {
   scene.remove(target.mesh);
   world.removeBody(target.body);
   updateSelectedTotalOverlay();
+}
+
+function launchCashForPayout(target, nowMs) {
+  if (!target || target.isPayingOut) {
+    return;
+  }
+
+  const body = target.body;
+  body.type = CANNON.Body.DYNAMIC;
+  body.mass = target.originalMass;
+  body.updateMassProperties();
+  body.linearDamping = Math.max(target.originalLinearDamping, 0.04);
+  body.angularDamping = Math.max(target.originalAngularDamping, 0.02);
+  body.position.y = Math.max(body.position.y, PAYMENT_TRAY_BASE_THICKNESS + PAYMENT_TRAY_WALL_HEIGHT + 0.05);
+
+  const dx = body.position.x - PAYMENT_TRAY_CENTER_X;
+  const dz = body.position.z - PAYMENT_TRAY_CENTER_Z;
+  const len = Math.hypot(dx, dz);
+  let dirX = 0;
+  let dirZ = 0;
+  if (len > 1e-5) {
+    dirX = dx / len;
+    dirZ = dz / len;
+  } else {
+    const angle = Math.random() * Math.PI * 2;
+    dirX = Math.cos(angle);
+    dirZ = Math.sin(angle);
+  }
+
+  const upward =
+    PAYOUT_UPWARD_VELOCITY_MIN +
+    Math.random() * (PAYOUT_UPWARD_VELOCITY_MAX - PAYOUT_UPWARD_VELOCITY_MIN);
+  const sideScale = PAYOUT_SIDE_VELOCITY * (0.72 + Math.random() * 0.5);
+
+  body.velocity.set(
+    dirX * sideScale + (Math.random() - 0.5) * 0.38,
+    upward,
+    dirZ * sideScale + (Math.random() - 0.5) * 0.38
+  );
+  body.angularVelocity.set(
+    (Math.random() - 0.5) * 11.5,
+    (Math.random() - 0.5) * 11.5,
+    (Math.random() - 0.5) * 11.5
+  );
+  body.wakeUp();
+
+  target.isPayingOut = true;
+  payoutRemovalQueue.push({
+    obj: target,
+    removeAt: nowMs + PAYOUT_REMOVE_DELAY_MS
+  });
+}
+
+function processPayoutRemovalQueue(nowMs) {
+  if (payoutRemovalQueue.length === 0) {
+    return;
+  }
+
+  for (let i = payoutRemovalQueue.length - 1; i >= 0; i -= 1) {
+    const entry = payoutRemovalQueue[i];
+    if (nowMs < entry.removeAt) {
+      continue;
+    }
+    payoutRemovalQueue.splice(i, 1);
+    if (cashObjects.includes(entry.obj)) {
+      removeCashObject(entry.obj);
+    }
+  }
 }
 
 function exchangeCashObject(target) {
@@ -1526,6 +1613,7 @@ function clearAll() {
   for (let i = cashObjects.length - 1; i >= 0; i -= 1) {
     removeCashObject(cashObjects[i]);
   }
+  payoutRemovalQueue.length = 0;
   cashByMeshId.clear();
 
   running = false;
@@ -1539,12 +1627,13 @@ function setPointerFromEvent(event) {
 }
 
 function pickCashFromEvent(event) {
-  if (cashObjects.length === 0) {
+  const pickableObjects = cashObjects.filter((o) => !o.isPayingOut);
+  if (pickableObjects.length === 0) {
     return null;
   }
   setPointerFromEvent(event);
   raycaster.setFromCamera(pointer, camera);
-  const hit = raycaster.intersectObjects(cashObjects.map((o) => o.mesh), false)[0];
+  const hit = raycaster.intersectObjects(pickableObjects.map((o) => o.mesh), false)[0];
   if (!hit) {
     return null;
   }
@@ -1957,8 +2046,9 @@ function onPayButtonClick() {
   const next = Math.max(0, base - payAmount);
   setAmountInputValue(next, { persist: !gameState.active });
 
+  const nowMs = performance.now();
   for (const obj of targets) {
-    removeCashObject(obj);
+    launchCashForPayout(obj, nowMs);
   }
 
   if (!gameState.active) {
@@ -2035,6 +2125,7 @@ updateSelectedTotalOverlay();
 const clock = new THREE.Clock();
 
 function tick() {
+  const nowMs = performance.now();
   const delta = Math.min(clock.getDelta(), 0.05);
   spawnAccumulator += delta;
 
@@ -2048,6 +2139,7 @@ function tick() {
   applyCameraPanFollow(delta);
 
   world.step(FIXED_TIMESTEP, delta, MAX_SUBSTEPS);
+  processPayoutRemovalQueue(nowMs);
   syncMeshesFromPhysics();
   updateSelectedTotalOverlay();
   if (gameState.active) {
