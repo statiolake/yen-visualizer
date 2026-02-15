@@ -25,15 +25,11 @@ const DRAG_FOLLOW_RATE = 26;
 const CAMERA_PAN_FOLLOW_RATE = 18;
 const DOUBLE_TAP_INTERVAL_MS = 280;
 const DOUBLE_TAP_MAX_DISTANCE = 28;
-const ASIDE_COLS_DESKTOP = 2;
-const ASIDE_COLS_MOBILE = 2;
-const ASIDE_ROWS = 2;
-const ASIDE_LAYER_STEP = 0.07;
-const SELECTED_DROP_HEIGHT = 0.17;
-const SELECTED_RELOCATE_DISTANCE = 0.32;
-const SELECTED_GUIDE_STIFFNESS = 2.8;
-const SELECTED_GUIDE_DAMPING = 0.7;
-const SELECTED_MAX_GUIDE_FORCE = 0.72;
+const PAYMENT_SHORTCUT_DROP_HEIGHT = 1.05;
+const PAYMENT_SHORTCUT_DROP_JITTER = 0;
+const PAYMENT_SHORTCUT_DOWN_VELOCITY = -0.12;
+const PAYMENT_TRAY_DETECT_MARGIN = 0.03;
+const PAYMENT_TRAY_DETECT_MAX_Y = 1.15;
 
 const PAYMENT_TRAY_CENTER_X = 0;
 const PAYMENT_TRAY_WIDTH = 2.35;
@@ -44,7 +40,6 @@ const PAYMENT_TRAY_WALL_HEIGHT = 0.065;
 const PAYMENT_TRAY_INNER_PADDING = 0.12;
 const PAYMENT_TRAY_CENTER_Z =
   -INTERACTION_BOUNDS_HALF + PAYMENT_TRAY_DEPTH * 0.5 + PAYMENT_TRAY_RIM_THICKNESS + 0.14;
-const ASIDE_BASE_Y = PAYMENT_TRAY_BASE_THICKNESS + 0.014;
 
 const TABLE_RENDER_SIZE = 120;
 const CAMERA_BASE_POS = new THREE.Vector3(0, 5.8, 4.9);
@@ -161,7 +156,6 @@ const EXCHANGE_TARGET_BY_VALUE = new Map([
 ]);
 
 const cashObjects = [];
-const selectedObjects = [];
 const cashByMeshId = new Map();
 const pendingQueue = [];
 const dragState = {
@@ -203,6 +197,7 @@ let spawnAccumulator = 0;
 let settleAccumulator = 0;
 let running = false;
 let assetsReady = false;
+let lastOverlayTotal = -1;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x5f7f6d);
@@ -232,7 +227,7 @@ const cameraTarget = new THREE.Vector3();
 const panStartTablePoint = new THREE.Vector3();
 const panStartCameraOffset = new THREE.Vector3();
 const panDelta = new THREE.Vector3();
-const selectedGuideForce = new CANNON.Vec3();
+const trayObjectsScratch = [];
 const textureCache = new Map();
 const billMaterialCache = new Map();
 const billGeometryCache = new Map();
@@ -827,9 +822,39 @@ function formatYen(value) {
   return new Intl.NumberFormat("ja-JP").format(Math.max(0, Math.floor(value)));
 }
 
+function isInPaymentTrayBounds(x, z, margin = PAYMENT_TRAY_DETECT_MARGIN) {
+  const halfW = PAYMENT_TRAY_WIDTH * 0.5 - margin;
+  const halfD = PAYMENT_TRAY_DEPTH * 0.5 - margin;
+  return (
+    x >= PAYMENT_TRAY_CENTER_X - halfW &&
+    x <= PAYMENT_TRAY_CENTER_X + halfW &&
+    z >= PAYMENT_TRAY_CENTER_Z - halfD &&
+    z <= PAYMENT_TRAY_CENTER_Z + halfD
+  );
+}
+
+function isCashInPaymentTray(obj) {
+  if (dragState.active && dragState.obj === obj) {
+    return false;
+  }
+  const p = obj.body.position;
+  return isInPaymentTrayBounds(p.x, p.z) && p.y <= PAYMENT_TRAY_DETECT_MAX_Y;
+}
+
+function collectTrayObjects(targetList = trayObjectsScratch) {
+  targetList.length = 0;
+  for (const obj of cashObjects) {
+    if (isCashInPaymentTray(obj)) {
+      targetList.push(obj);
+    }
+  }
+  return targetList;
+}
+
 function getSelectedTotalAmount() {
+  const trayObjects = collectTrayObjects();
   let total = 0;
-  for (const obj of selectedObjects) {
+  for (const obj of trayObjects) {
     total += obj.representedValue ?? obj.denomination.value;
   }
   return total;
@@ -837,6 +862,11 @@ function getSelectedTotalAmount() {
 
 function updateSelectedTotalOverlay() {
   const total = getSelectedTotalAmount();
+  if (total === lastOverlayTotal) {
+    return;
+  }
+  lastOverlayTotal = total;
+
   if (total > 0) {
     selectedTotalValue.textContent = `${formatYen(total)}円`;
     selectedTotalOverlay.classList.add("is-visible");
@@ -846,93 +876,19 @@ function updateSelectedTotalOverlay() {
   }
 }
 
-function applyAsideLayout() {
-  const cols = window.innerWidth <= 720 ? ASIDE_COLS_MOBILE : ASIDE_COLS_DESKTOP;
-  const innerWidth =
-    PAYMENT_TRAY_WIDTH - PAYMENT_TRAY_RIM_THICKNESS * 2 - PAYMENT_TRAY_INNER_PADDING * 2;
-  const innerDepth =
-    PAYMENT_TRAY_DEPTH - PAYMENT_TRAY_RIM_THICKNESS * 2 - PAYMENT_TRAY_INNER_PADDING * 2;
-  const colStep = cols > 1 ? innerWidth / (cols - 1) : 0;
-  const rowStep = ASIDE_ROWS > 1 ? innerDepth / (ASIDE_ROWS - 1) : 0;
-  const xStart = PAYMENT_TRAY_CENTER_X - innerWidth * 0.5;
-  const zStart = PAYMENT_TRAY_CENTER_Z - innerDepth * 0.5;
-
-  for (let i = 0; i < selectedObjects.length; i += 1) {
-    const obj = selectedObjects[i];
-    const slot = i % (cols * ASIDE_ROWS);
-    const layer = Math.floor(i / (cols * ASIDE_ROWS));
-    const col = slot % cols;
-    const row = Math.floor(slot / cols);
-
-    const rawX = xStart + col * colStep;
-    const rawZ = zStart + row * rowStep;
-    const clamped = clampToBounds(rawX, rawZ, 0.24);
-    const y = ASIDE_BASE_Y + layer * ASIDE_LAYER_STEP;
-    const yaw = obj.kind === "bill" ? 0 : (col - (cols - 1) * 0.5) * 0.08;
-
-    const body = obj.body;
-    body.type = CANNON.Body.DYNAMIC;
-    body.mass = obj.originalMass;
-    body.updateMassProperties();
-    body.linearDamping = Math.max(obj.originalLinearDamping, obj.kind === "bill" ? 0.4 : 0.28);
-    body.angularDamping = Math.max(obj.originalAngularDamping, obj.kind === "bill" ? 0.5 : 0.22);
-
-    obj.selectedTarget = {
-      x: clamped.x,
-      y,
-      z: clamped.z,
-      yaw
-    };
-
-    const dx = body.position.x - clamped.x;
-    const dz = body.position.z - clamped.z;
-    const farFromSlot = dx * dx + dz * dz > SELECTED_RELOCATE_DISTANCE * SELECTED_RELOCATE_DISTANCE;
-    const tooLow = body.position.y < ASIDE_BASE_Y + 0.004;
-    if (obj.needsTrayDrop || farFromSlot || tooLow) {
-      const jitterX = (Math.random() - 0.5) * 0.035;
-      const jitterZ = (Math.random() - 0.5) * 0.035;
-      body.position.set(clamped.x + jitterX, y + SELECTED_DROP_HEIGHT, clamped.z + jitterZ);
-      body.quaternion.setFromEuler(0, yaw, 0);
-      body.velocity.set(0, -0.08, 0);
-      body.angularVelocity.set(
-        (Math.random() - 0.5) * (obj.kind === "bill" ? 0.22 : 0.42),
-        (Math.random() - 0.5) * (obj.kind === "bill" ? 0.08 : 0.34),
-        (Math.random() - 0.5) * (obj.kind === "bill" ? 0.22 : 0.42)
-      );
-    }
-    obj.needsTrayDrop = false;
-    body.wakeUp();
-  }
-}
-
-function selectCashObject(obj) {
-  if (obj.isSelected) {
-    return;
-  }
-  obj.savedPose = {
-    position: obj.body.position.clone(),
-    quaternion: obj.body.quaternion.clone()
+function randomTrayTarget() {
+  return {
+    x: PAYMENT_TRAY_CENTER_X,
+    z: PAYMENT_TRAY_CENTER_Z
   };
-  obj.isSelected = true;
-  obj.needsTrayDrop = true;
-  selectedObjects.push(obj);
-  applyAsideLayout();
-  updateSelectedTotalOverlay();
 }
 
-function deselectCashObject(obj) {
-  if (!obj.isSelected) {
-    return;
-  }
+function randomPileTarget() {
+  const base = randomDropTarget();
+  return clampToBounds(base.x * 0.88, base.z + 0.72, 0.22);
+}
 
-  const idx = selectedObjects.indexOf(obj);
-  if (idx >= 0) {
-    selectedObjects.splice(idx, 1);
-  }
-
-  obj.isSelected = false;
-  obj.selectedTarget = null;
-  obj.needsTrayDrop = false;
+function dropCashFromAbove(obj, target) {
   const body = obj.body;
   body.type = CANNON.Body.DYNAMIC;
   body.mass = obj.originalMass;
@@ -940,25 +896,34 @@ function deselectCashObject(obj) {
   body.linearDamping = obj.originalLinearDamping;
   body.angularDamping = obj.originalAngularDamping;
 
-  const savedPos = obj.savedPose?.position ?? body.position;
-  const savedQuat = obj.savedPose?.quaternion ?? body.quaternion;
-  body.position.set(savedPos.x, savedPos.y + 0.03, savedPos.z);
-  body.quaternion.set(savedQuat.x, savedQuat.y, savedQuat.z, savedQuat.w);
-  body.velocity.set(0, -0.05, 0);
-  body.angularVelocity.set(0, 0, 0);
-  body.wakeUp();
+  const x = target.x + (Math.random() - 0.5) * PAYMENT_SHORTCUT_DROP_JITTER;
+  const z = target.z + (Math.random() - 0.5) * PAYMENT_SHORTCUT_DROP_JITTER;
+  const clamped = clampToBounds(x, z, 0.16);
+  const y = PAYMENT_SHORTCUT_DROP_HEIGHT + Math.random() * 0.12;
+  const quat = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler((Math.random() - 0.5) * 0.15, Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.12)
+  );
 
-  obj.savedPose = null;
-  applyAsideLayout();
-  updateSelectedTotalOverlay();
+  body.position.set(clamped.x, y, clamped.z);
+  body.quaternion.set(quat.x, quat.y, quat.z, quat.w);
+  body.velocity.set(
+    (Math.random() - 0.5) * 0.12,
+    PAYMENT_SHORTCUT_DOWN_VELOCITY - Math.random() * 0.08,
+    (Math.random() - 0.5) * 0.12
+  );
+  body.angularVelocity.set(
+    (Math.random() - 0.5) * (obj.kind === "bill" ? 0.22 : 0.48),
+    (Math.random() - 0.5) * (obj.kind === "bill" ? 0.12 : 0.36),
+    (Math.random() - 0.5) * (obj.kind === "bill" ? 0.22 : 0.48)
+  );
+  body.wakeUp();
 }
 
-function toggleSelectedState(obj) {
-  if (obj.isSelected) {
-    deselectCashObject(obj);
-  } else {
-    selectCashObject(obj);
-  }
+function toggleShortcutPaymentArea(obj) {
+  const toTray = !isCashInPaymentTray(obj);
+  const target = toTray ? randomTrayTarget() : randomPileTarget();
+  dropCashFromAbove(obj, target);
+  updateSelectedTotalOverlay();
 }
 
 function spawnCash(entry, options = null) {
@@ -1011,10 +976,6 @@ function spawnCash(entry, options = null) {
   obj.originalMass = body.mass;
   obj.originalLinearDamping = body.linearDamping;
   obj.originalAngularDamping = body.angularDamping;
-  obj.isSelected = false;
-  obj.savedPose = null;
-  obj.selectedTarget = null;
-  obj.needsTrayDrop = false;
   scene.add(mesh);
   world.addBody(body);
   cashObjects.push(obj);
@@ -1022,17 +983,6 @@ function spawnCash(entry, options = null) {
 }
 
 function removeCashObject(target) {
-  if (target.isSelected) {
-    const sidx = selectedObjects.indexOf(target);
-    if (sidx >= 0) {
-      selectedObjects.splice(sidx, 1);
-    }
-    target.isSelected = false;
-    target.savedPose = null;
-    target.selectedTarget = null;
-    target.needsTrayDrop = false;
-  }
-
   const idx = cashObjects.indexOf(target);
   if (idx >= 0) {
     cashObjects.splice(idx, 1);
@@ -1040,7 +990,6 @@ function removeCashObject(target) {
   cashByMeshId.delete(target.mesh.id);
   scene.remove(target.mesh);
   world.removeBody(target.body);
-  applyAsideLayout();
   updateSelectedTotalOverlay();
 }
 
@@ -1216,6 +1165,7 @@ function clearAll() {
   cameraOffset.set(0, 0, 0);
   cameraOffsetTarget.set(0, 0, 0);
   setFixedCamera();
+  lastOverlayTotal = -1;
   pendingQueue.length = 0;
 
   for (let i = cashObjects.length - 1; i >= 0; i -= 1) {
@@ -1314,36 +1264,6 @@ function applyCameraPanFollow(delta) {
   const moved = Math.abs(cameraOffset.x - beforeX) > 1e-4 || Math.abs(cameraOffset.z - beforeZ) > 1e-4;
   if (moved) {
     setFixedCamera();
-  }
-}
-
-function applySelectedTrayGuidance() {
-  if (selectedObjects.length === 0) {
-    return;
-  }
-
-  for (const obj of selectedObjects) {
-    if (!obj.selectedTarget) {
-      continue;
-    }
-
-    const body = obj.body;
-    const dx = obj.selectedTarget.x - body.position.x;
-    const dz = obj.selectedTarget.z - body.position.z;
-    const fx = (dx * SELECTED_GUIDE_STIFFNESS - body.velocity.x * SELECTED_GUIDE_DAMPING) * body.mass;
-    const fz = (dz * SELECTED_GUIDE_STIFFNESS - body.velocity.z * SELECTED_GUIDE_DAMPING) * body.mass;
-
-    selectedGuideForce.set(fx, 0, fz);
-    const fLen = selectedGuideForce.length();
-    const maxForce = SELECTED_MAX_GUIDE_FORCE * body.mass;
-    if (fLen > maxForce && fLen > 1e-6) {
-      selectedGuideForce.scale(maxForce / fLen, selectedGuideForce);
-    }
-
-    body.applyForce(selectedGuideForce, body.position);
-    if (dx * dx + dz * dz > 0.0009) {
-      body.wakeUp();
-    }
   }
 }
 
@@ -1447,7 +1367,7 @@ function flushPendingTapSelection() {
   const obj = tapState.obj;
   clearPendingTap();
   if (cashObjects.includes(obj)) {
-    toggleSelectedState(obj);
+    toggleShortcutPaymentArea(obj);
   }
 }
 
@@ -1455,7 +1375,7 @@ function handleTapAction(event, obj) {
   // Keep desktop behavior snappy. Use tap gesture disambiguation only for touch.
   if (event.pointerType !== "touch") {
     flushPendingTapSelection();
-    toggleSelectedState(obj);
+    toggleShortcutPaymentArea(obj);
     return;
   }
 
@@ -1488,7 +1408,7 @@ function handleTapAction(event, obj) {
     const target = tapState.obj;
     clearPendingTap();
     if (target && cashObjects.includes(target)) {
-      toggleSelectedState(target);
+      toggleShortcutPaymentArea(target);
     }
   }, DOUBLE_TAP_INTERVAL_MS);
 }
@@ -1568,10 +1488,6 @@ function onViewportPointerMove(event) {
   const dy = event.clientY - gestureState.startY;
   const moved = dx * dx + dy * dy;
   if (moved >= DRAG_START_PIXELS * DRAG_START_PIXELS) {
-    if (gestureState.picked?.obj?.isSelected) {
-      gestureState.dragStarted = true;
-      return;
-    }
     gestureState.dragStarted = true;
     startDraggingFromPicked(gestureState.picked, event);
   }
@@ -1640,7 +1556,11 @@ function onViewportContextMenu(event) {
 function onPayButtonClick() {
   flushPendingTapSelection();
 
-  const payAmount = getSelectedTotalAmount();
+  const targets = collectTrayObjects([]);
+  let payAmount = 0;
+  for (const obj of targets) {
+    payAmount += obj.representedValue ?? obj.denomination.value;
+  }
   if (payAmount <= 0) {
     return;
   }
@@ -1650,7 +1570,6 @@ function onPayButtonClick() {
   const next = Math.max(0, base - payAmount);
   amountInput.value = String(next);
 
-  const targets = selectedObjects.slice();
   for (const obj of targets) {
     removeCashObject(obj);
   }
@@ -1690,7 +1609,6 @@ function resize() {
   setFixedCamera();
   camera.updateProjectionMatrix();
   renderer.setSize(width, height);
-  applyAsideLayout();
 }
 
 visualizeForm.addEventListener("submit", queueFromAmount);
@@ -1718,10 +1636,10 @@ function tick() {
 
   applyDraggedBodyFollow(delta);
   applyCameraPanFollow(delta);
-  applySelectedTrayGuidance();
 
   world.step(FIXED_TIMESTEP, delta, MAX_SUBSTEPS);
   syncMeshesFromPhysics();
+  updateSelectedTotalOverlay();
 
   if (running && pendingQueue.length === 0) {
     if (isPileSettled()) {
