@@ -20,6 +20,8 @@ const MAX_VISUAL_ITEMS = 480;
 const INTERACTION_BOUNDS_HALF = 2.9;
 const DRAG_LIFT_HEIGHT = 0.12;
 const DRAG_START_PIXELS = 8;
+const DOUBLE_TAP_INTERVAL_MS = 280;
+const DOUBLE_TAP_MAX_DISTANCE = 28;
 const ASIDE_COLS = 3;
 const ASIDE_ROWS = 16;
 const ASIDE_COL_STEP = 0.28;
@@ -160,6 +162,13 @@ const gestureState = {
   startY: 0,
   picked: null,
   dragStarted: false
+};
+const tapState = {
+  timerId: null,
+  obj: null,
+  x: 0,
+  y: 0,
+  time: 0
 };
 
 let spawnAccumulator = 0;
@@ -970,6 +979,7 @@ function queueFromAmount(event) {
 function clearAll() {
   finishDragging();
   resetGesture();
+  clearPendingTap();
   pendingQueue.length = 0;
 
   for (let i = cashObjects.length - 1; i >= 0; i -= 1) {
@@ -1090,6 +1100,71 @@ function resetGesture() {
   gestureState.dragStarted = false;
 }
 
+function clearPendingTap() {
+  if (tapState.timerId !== null) {
+    window.clearTimeout(tapState.timerId);
+  }
+  tapState.timerId = null;
+  tapState.obj = null;
+  tapState.x = 0;
+  tapState.y = 0;
+  tapState.time = 0;
+}
+
+function flushPendingTapSelection() {
+  if (tapState.timerId === null || !tapState.obj) {
+    clearPendingTap();
+    return;
+  }
+  const obj = tapState.obj;
+  clearPendingTap();
+  if (cashObjects.includes(obj)) {
+    toggleSelectedState(obj);
+  }
+}
+
+function handleTapAction(event, obj) {
+  // Keep desktop behavior snappy. Use tap gesture disambiguation only for touch.
+  if (event.pointerType !== "touch") {
+    flushPendingTapSelection();
+    toggleSelectedState(obj);
+    return;
+  }
+
+  const now = performance.now();
+  const hasPending = tapState.timerId !== null && tapState.obj;
+
+  if (hasPending) {
+    const dt = now - tapState.time;
+    const dx = event.clientX - tapState.x;
+    const dy = event.clientY - tapState.y;
+    const movedSq = dx * dx + dy * dy;
+    const isDoubleTap =
+      tapState.obj === obj &&
+      dt <= DOUBLE_TAP_INTERVAL_MS &&
+      movedSq <= DOUBLE_TAP_MAX_DISTANCE * DOUBLE_TAP_MAX_DISTANCE;
+
+    if (isDoubleTap) {
+      clearPendingTap();
+      exchangeCashObject(obj);
+      return;
+    }
+  }
+
+  flushPendingTapSelection();
+  tapState.obj = obj;
+  tapState.x = event.clientX;
+  tapState.y = event.clientY;
+  tapState.time = now;
+  tapState.timerId = window.setTimeout(() => {
+    const target = tapState.obj;
+    clearPendingTap();
+    if (target && cashObjects.includes(target)) {
+      toggleSelectedState(target);
+    }
+  }, DOUBLE_TAP_INTERVAL_MS);
+}
+
 function onViewportPointerDown(event) {
   if (event.button !== 0 || !assetsReady || dragState.active) {
     return;
@@ -1152,7 +1227,7 @@ function onViewportPointerUp(event) {
 
   event.preventDefault();
   if (!gestureState.dragStarted && gestureState.picked?.obj) {
-    toggleSelectedState(gestureState.picked.obj);
+    handleTapAction(event, gestureState.picked.obj);
   }
 
   if (viewport.hasPointerCapture(event.pointerId)) {
@@ -1189,6 +1264,8 @@ function onViewportContextMenu(event) {
 }
 
 function onPayButtonClick() {
+  flushPendingTapSelection();
+
   const payAmount = getSelectedTotalAmount();
   if (payAmount <= 0) {
     return;
