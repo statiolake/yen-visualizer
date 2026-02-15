@@ -115,7 +115,20 @@ const DENOMINATIONS = [
   }
 ];
 
+const DENOMINATION_BY_VALUE = new Map(DENOMINATIONS.map((d) => [d.value, d]));
+const EXCHANGE_TARGET_BY_VALUE = new Map([
+  [10000, 5000],
+  [5000, 1000],
+  [1000, 500],
+  [500, 100],
+  [100, 50],
+  [50, 10],
+  [10, 5],
+  [5, 1]
+]);
+
 const cashObjects = [];
+const cashByMeshId = new Map();
 const pendingQueue = [];
 
 let spawnAccumulator = 0;
@@ -139,6 +152,8 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 viewport.appendChild(renderer.domElement);
 
 const textureLoader = new THREE.TextureLoader();
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
 const textureCache = new Map();
 const billMaterialCache = new Map();
 const billGeometryCache = new Map();
@@ -532,8 +547,9 @@ function randomDropTarget() {
   };
 }
 
-function spawnCash(entry) {
+function spawnCash(entry, options = null) {
   const { denomination } = entry;
+  const representedValue = entry.representedValue ?? denomination.value;
   const obj = createCashObject(denomination);
   const { mesh, body, kind } = obj;
 
@@ -542,9 +558,9 @@ function spawnCash(entry) {
 
   const target = randomDropTarget();
   const drift = kind === "bill" ? 0.55 : 0.38;
-  const startX = target.x + (Math.random() - 0.5) * drift;
-  const startY = DROP_HEIGHT + Math.random() * 1.1;
-  const startZ = target.z + (Math.random() - 0.5) * drift;
+  const startX = options?.position?.x ?? (target.x + (Math.random() - 0.5) * drift);
+  const startZ = options?.position?.z ?? (target.z + (Math.random() - 0.5) * drift);
+  const startY = options?.position?.y ?? (DROP_HEIGHT + Math.random() * 1.1);
 
   const euler = new THREE.Euler(
     (Math.random() - 0.5) * (kind === "bill" ? 0.22 : 0.5),
@@ -558,20 +574,89 @@ function spawnCash(entry) {
 
   body.position.set(startX, startY, startZ);
   body.quaternion.set(quat.x, quat.y, quat.z, quat.w);
-  body.velocity.set(
-    (Math.random() - 0.5) * (kind === "bill" ? 0.55 : 0.35),
-    -(0.2 + Math.random() * 0.3),
-    (Math.random() - 0.5) * (kind === "bill" ? 0.55 : 0.35)
-  );
+  if (options?.velocity) {
+    body.velocity.set(options.velocity.x, options.velocity.y, options.velocity.z);
+  } else {
+    body.velocity.set(
+      (Math.random() - 0.5) * (kind === "bill" ? 0.55 : 0.35),
+      -(0.2 + Math.random() * 0.3),
+      (Math.random() - 0.5) * (kind === "bill" ? 0.55 : 0.35)
+    );
+  }
   body.angularVelocity.set(
     (Math.random() - 0.5) * (kind === "bill" ? 1.1 : 2.6),
     (Math.random() - 0.5) * (kind === "bill" ? 0.9 : 2.2),
     (Math.random() - 0.5) * (kind === "bill" ? 1.1 : 2.6)
   );
 
+  obj.denomination = denomination;
+  obj.representedValue = representedValue;
   scene.add(mesh);
   world.addBody(body);
   cashObjects.push(obj);
+  cashByMeshId.set(mesh.id, obj);
+}
+
+function removeCashObject(target) {
+  const idx = cashObjects.indexOf(target);
+  if (idx >= 0) {
+    cashObjects.splice(idx, 1);
+  }
+  cashByMeshId.delete(target.mesh.id);
+  scene.remove(target.mesh);
+  world.removeBody(target.body);
+}
+
+function exchangeCashObject(target) {
+  const currentValue = target.denomination.value;
+  const nextValue = EXCHANGE_TARGET_BY_VALUE.get(currentValue);
+  if (!nextValue) {
+    return false;
+  }
+
+  const targetDenomination = DENOMINATION_BY_VALUE.get(nextValue);
+  if (!targetDenomination) {
+    return false;
+  }
+
+  const pieceCount = Math.floor(currentValue / nextValue);
+  if (pieceCount <= 1) {
+    return false;
+  }
+
+  const representedValue = target.representedValue ?? currentValue;
+  if (representedValue % pieceCount !== 0) {
+    return false;
+  }
+  const perPieceValue = representedValue / pieceCount;
+
+  const origin = target.body.position.clone();
+  removeCashObject(target);
+
+  for (let i = 0; i < pieceCount; i += 1) {
+    const angle = (i / pieceCount) * Math.PI * 2 + Math.random() * 0.4;
+    const radius = 0.08 + Math.random() * 0.06;
+    spawnCash(
+      {
+        denomination: targetDenomination,
+        representedValue: perPieceValue
+      },
+      {
+        position: {
+          x: origin.x + Math.cos(angle) * radius,
+          y: origin.y + 0.08 + i * 0.008,
+          z: origin.z + Math.sin(angle) * radius
+        },
+        velocity: {
+          x: Math.cos(angle) * (0.25 + Math.random() * 0.12),
+          y: 0.95 + Math.random() * 0.45,
+          z: Math.sin(angle) * (0.25 + Math.random() * 0.12)
+        }
+      }
+    );
+  }
+
+  return true;
 }
 
 function syncMeshesFromPhysics() {
@@ -658,12 +743,6 @@ function parseAmount(raw) {
   };
 }
 
-const DEFAULT_BUTTON_LABEL = "を可視化";
-
-function setDropButtonLabel(text) {
-  dropButton.textContent = text;
-}
-
 function queueFromAmount(event) {
   if (event) {
     event.preventDefault();
@@ -690,21 +769,42 @@ function queueFromAmount(event) {
   running = true;
   spawnAccumulator = 0;
   settleAccumulator = 0;
-  setDropButtonLabel("可視化中...");
 }
 
 function clearAll() {
   pendingQueue.length = 0;
 
-  for (const obj of cashObjects) {
-    scene.remove(obj.mesh);
-    world.removeBody(obj.body);
+  for (let i = cashObjects.length - 1; i >= 0; i -= 1) {
+    removeCashObject(cashObjects[i]);
   }
-  cashObjects.length = 0;
+  cashByMeshId.clear();
 
   running = false;
   settleAccumulator = 0;
-  setDropButtonLabel(DEFAULT_BUTTON_LABEL);
+}
+
+function onViewportContextMenu(event) {
+  event.preventDefault();
+  if (!assetsReady || cashObjects.length === 0) {
+    return;
+  }
+
+  const rect = viewport.getBoundingClientRect();
+  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(pointer, camera);
+  const hit = raycaster.intersectObjects(cashObjects.map((o) => o.mesh), false)[0];
+  if (!hit) {
+    return;
+  }
+
+  const target = cashByMeshId.get(hit.object.id);
+  if (!target) {
+    return;
+  }
+
+  exchangeCashObject(target);
 }
 
 function isBodySettled(body) {
@@ -741,6 +841,7 @@ function resize() {
 }
 
 visualizeForm.addEventListener("submit", queueFromAmount);
+viewport.addEventListener("contextmenu", onViewportContextMenu);
 window.addEventListener("resize", resize);
 resize();
 
@@ -768,7 +869,6 @@ function tick() {
 
     if (settleAccumulator > 0.75) {
       running = false;
-      setDropButtonLabel(DEFAULT_BUTTON_LABEL);
     }
   }
 
@@ -780,18 +880,15 @@ tick();
 
 async function initAssets() {
   dropButton.disabled = true;
-  setDropButtonLabel("読込中...");
 
   try {
     await preloadTextures();
     assetsReady = true;
     dropButton.disabled = false;
-    setDropButtonLabel(DEFAULT_BUTTON_LABEL);
   } catch (error) {
     console.error(error);
     assetsReady = false;
     dropButton.disabled = true;
-    setDropButtonLabel("読込失敗");
   }
 }
 
