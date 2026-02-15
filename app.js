@@ -38,6 +38,7 @@ const DOUBLE_TAP_INTERVAL_MS = 280;
 const DOUBLE_TAP_MAX_DISTANCE = 28;
 const PAYMENT_SHORTCUT_DROP_HEIGHT = 1.05;
 const PAYMENT_SHORTCUT_DROP_JITTER = 0;
+const PAYMENT_TRAY_COIN_TARGET_JITTER = 0.24;
 const PAYMENT_SHORTCUT_DOWN_VELOCITY = -0.12;
 const PAYOUT_REMOVE_DELAY_MS = 560;
 const PAYOUT_UPWARD_VELOCITY_MIN = 8.8;
@@ -1238,10 +1239,11 @@ function updateSelectedTotalOverlay() {
   }
 }
 
-function randomTrayTarget() {
+function randomTrayTarget(obj = null) {
+  const spread = obj?.kind === "coin" ? PAYMENT_TRAY_COIN_TARGET_JITTER : 0;
   return {
-    x: PAYMENT_TRAY_CENTER_X,
-    z: PAYMENT_TRAY_CENTER_Z
+    x: PAYMENT_TRAY_CENTER_X + (Math.random() - 0.5) * spread,
+    z: PAYMENT_TRAY_CENTER_Z + (Math.random() - 0.5) * spread
   };
 }
 
@@ -1283,7 +1285,7 @@ function dropCashFromAbove(obj, target) {
 
 function toggleShortcutPaymentArea(obj) {
   const toTray = !isCashInPaymentTray(obj);
-  const target = toTray ? randomTrayTarget() : randomPileTarget();
+  const target = toTray ? randomTrayTarget(obj) : randomPileTarget();
   dropCashFromAbove(obj, target);
   updateSelectedTotalOverlay();
 }
