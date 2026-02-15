@@ -4,6 +4,8 @@
   --ink: #1a2b20;
   --button-bg: #1f6f3f;
   --button-ink: #f4fbf6;
+  --total-bg: rgba(17, 31, 23, 0.74);
+  --total-ink: #ecf6ef;
 }
 
 * {
@@ -50,6 +52,49 @@ body {
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.22);
 }
 
+.selected-total {
+  position: absolute;
+  left: 50%;
+  top: 78px;
+  transform: translate(-50%, -10px) scale(0.96);
+  opacity: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--total-bg);
+  color: var(--total-ink);
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.26);
+  pointer-events: none;
+  transition:
+    opacity 0.16s ease,
+    transform 0.22s cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+
+.selected-total.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+  pointer-events: auto;
+}
+
+#selectedTotalValue {
+  min-width: 5ch;
+  text-align: right;
+}
+
+#payButton {
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.84rem;
+  line-height: 1;
+  background: #e5f3e8;
+  color: #173726;
+}
+
 input {
   width: 180px;
   border-radius: 8px;
@@ -90,5 +135,10 @@ canvas {
   input {
     width: 100%;
     min-width: 0;
+  }
+
+  .selected-total {
+    top: 58px;
+    font-size: 0.88rem;
   }
 }

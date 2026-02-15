@@ -5,6 +5,9 @@ const amountInput = document.querySelector("#amountInput");
 const dropButton = document.querySelector("#dropButton");
 const visualizeForm = document.querySelector("#visualizeForm");
 const viewport = document.querySelector("#viewport");
+const selectedTotalOverlay = document.querySelector("#selectedTotalOverlay");
+const selectedTotalValue = document.querySelector("#selectedTotalValue");
+const payButton = document.querySelector("#payButton");
 
 const IMAGE_DIR = "./money_images";
 const NOTE_WIDTH = 1.5;
@@ -16,6 +19,14 @@ const DROP_RADIUS = 1.45;
 const MAX_VISUAL_ITEMS = 480;
 const INTERACTION_BOUNDS_HALF = 2.9;
 const DRAG_LIFT_HEIGHT = 0.12;
+const DRAG_START_PIXELS = 8;
+const ASIDE_COLS = 3;
+const ASIDE_ROWS = 16;
+const ASIDE_COL_STEP = 0.28;
+const ASIDE_ROW_STEP = 0.22;
+const ASIDE_LAYER_STEP = 0.09;
+const ASIDE_BASE_X = INTERACTION_BOUNDS_HALF - 0.38;
+const ASIDE_START_Z = -1.72;
 
 const TABLE_RENDER_SIZE = 120;
 const CAMERA_POS = new THREE.Vector3(0, 5.8, 4.9);
@@ -130,6 +141,7 @@ const EXCHANGE_TARGET_BY_VALUE = new Map([
 ]);
 
 const cashObjects = [];
+const selectedObjects = [];
 const cashByMeshId = new Map();
 const pendingQueue = [];
 const dragState = {
@@ -140,6 +152,14 @@ const dragState = {
   grabOffsetX: 0,
   grabOffsetZ: 0,
   originalMass: 0
+};
+const gestureState = {
+  active: false,
+  pointerId: null,
+  startX: 0,
+  startY: 0,
+  picked: null,
+  dragStarted: false
 };
 
 let spawnAccumulator = 0;
@@ -607,6 +627,105 @@ function clampToBounds(x, z, margin = 0.04) {
   };
 }
 
+function formatYen(value) {
+  return new Intl.NumberFormat("ja-JP").format(Math.max(0, Math.floor(value)));
+}
+
+function getSelectedTotalAmount() {
+  let total = 0;
+  for (const obj of selectedObjects) {
+    total += obj.representedValue ?? obj.denomination.value;
+  }
+  return total;
+}
+
+function updateSelectedTotalOverlay() {
+  const total = getSelectedTotalAmount();
+  if (total > 0) {
+    selectedTotalValue.textContent = `${formatYen(total)}円`;
+    selectedTotalOverlay.classList.add("is-visible");
+  } else {
+    selectedTotalOverlay.classList.remove("is-visible");
+    selectedTotalValue.textContent = "";
+  }
+}
+
+function applyAsideLayout() {
+  for (let i = 0; i < selectedObjects.length; i += 1) {
+    const obj = selectedObjects[i];
+    const slot = i % (ASIDE_COLS * ASIDE_ROWS);
+    const layer = Math.floor(i / (ASIDE_COLS * ASIDE_ROWS));
+    const col = slot % ASIDE_COLS;
+    const row = Math.floor(slot / ASIDE_COLS);
+
+    const x = ASIDE_BASE_X - col * ASIDE_COL_STEP;
+    const z = ASIDE_START_Z + row * ASIDE_ROW_STEP;
+    const y = 0.03 + layer * ASIDE_LAYER_STEP;
+    const yaw = (col - (ASIDE_COLS - 1) * 0.5) * 0.08;
+
+    const body = obj.body;
+    body.type = CANNON.Body.KINEMATIC;
+    body.mass = 0;
+    body.updateMassProperties();
+    body.position.set(x, y, z);
+    body.quaternion.setFromEuler(0, yaw, 0);
+    body.velocity.set(0, 0, 0);
+    body.angularVelocity.set(0, 0, 0);
+    body.wakeUp();
+  }
+}
+
+function selectCashObject(obj) {
+  if (obj.isSelected) {
+    return;
+  }
+  obj.savedPose = {
+    position: obj.body.position.clone(),
+    quaternion: obj.body.quaternion.clone()
+  };
+  obj.isSelected = true;
+  selectedObjects.push(obj);
+  applyAsideLayout();
+  updateSelectedTotalOverlay();
+}
+
+function deselectCashObject(obj) {
+  if (!obj.isSelected) {
+    return;
+  }
+
+  const idx = selectedObjects.indexOf(obj);
+  if (idx >= 0) {
+    selectedObjects.splice(idx, 1);
+  }
+
+  obj.isSelected = false;
+  const body = obj.body;
+  body.type = CANNON.Body.DYNAMIC;
+  body.mass = obj.originalMass;
+  body.updateMassProperties();
+
+  const savedPos = obj.savedPose?.position ?? body.position;
+  const savedQuat = obj.savedPose?.quaternion ?? body.quaternion;
+  body.position.set(savedPos.x, savedPos.y + 0.03, savedPos.z);
+  body.quaternion.set(savedQuat.x, savedQuat.y, savedQuat.z, savedQuat.w);
+  body.velocity.set(0, -0.05, 0);
+  body.angularVelocity.set(0, 0, 0);
+  body.wakeUp();
+
+  obj.savedPose = null;
+  applyAsideLayout();
+  updateSelectedTotalOverlay();
+}
+
+function toggleSelectedState(obj) {
+  if (obj.isSelected) {
+    deselectCashObject(obj);
+  } else {
+    selectCashObject(obj);
+  }
+}
+
 function spawnCash(entry, options = null) {
   const { denomination } = entry;
   const representedValue = entry.representedValue ?? denomination.value;
@@ -654,6 +773,9 @@ function spawnCash(entry, options = null) {
 
   obj.denomination = denomination;
   obj.representedValue = representedValue;
+  obj.originalMass = body.mass;
+  obj.isSelected = false;
+  obj.savedPose = null;
   scene.add(mesh);
   world.addBody(body);
   cashObjects.push(obj);
@@ -661,6 +783,15 @@ function spawnCash(entry, options = null) {
 }
 
 function removeCashObject(target) {
+  if (target.isSelected) {
+    const sidx = selectedObjects.indexOf(target);
+    if (sidx >= 0) {
+      selectedObjects.splice(sidx, 1);
+    }
+    target.isSelected = false;
+    target.savedPose = null;
+  }
+
   const idx = cashObjects.indexOf(target);
   if (idx >= 0) {
     cashObjects.splice(idx, 1);
@@ -668,6 +799,8 @@ function removeCashObject(target) {
   cashByMeshId.delete(target.mesh.id);
   scene.remove(target.mesh);
   world.removeBody(target.body);
+  applyAsideLayout();
+  updateSelectedTotalOverlay();
 }
 
 function exchangeCashObject(target) {
@@ -836,6 +969,7 @@ function queueFromAmount(event) {
 
 function clearAll() {
   finishDragging();
+  resetGesture();
   pendingQueue.length = 0;
 
   for (let i = cashObjects.length - 1; i >= 0; i -= 1) {
@@ -924,19 +1058,7 @@ function finishDragging() {
   viewport.style.cursor = "";
 }
 
-function onViewportPointerDown(event) {
-  if (event.button !== 0 || !assetsReady || dragState.active) {
-    return;
-  }
-
-  const picked = pickCashFromEvent(event);
-  if (!picked) {
-    return;
-  }
-
-  event.preventDefault();
-  viewport.setPointerCapture(event.pointerId);
-
+function startDraggingFromPicked(picked, event) {
   const { hit, obj } = picked;
   const body = obj.body;
   body.wakeUp();
@@ -959,20 +1081,97 @@ function onViewportPointerDown(event) {
   updateDraggedBodyPosition(event);
 }
 
-function onViewportPointerMove(event) {
-  if (!dragState.active || event.pointerId !== dragState.pointerId) {
+function resetGesture() {
+  gestureState.active = false;
+  gestureState.pointerId = null;
+  gestureState.startX = 0;
+  gestureState.startY = 0;
+  gestureState.picked = null;
+  gestureState.dragStarted = false;
+}
+
+function onViewportPointerDown(event) {
+  if (event.button !== 0 || !assetsReady || dragState.active) {
     return;
   }
+
+  const picked = pickCashFromEvent(event);
+  if (!picked) {
+    return;
+  }
+
   event.preventDefault();
-  updateDraggedBodyPosition(event);
+  viewport.setPointerCapture(event.pointerId);
+  gestureState.active = true;
+  gestureState.pointerId = event.pointerId;
+  gestureState.startX = event.clientX;
+  gestureState.startY = event.clientY;
+  gestureState.picked = picked;
+  gestureState.dragStarted = false;
+}
+
+function onViewportPointerMove(event) {
+  if (dragState.active && event.pointerId === dragState.pointerId) {
+    event.preventDefault();
+    updateDraggedBodyPosition(event);
+    return;
+  }
+
+  if (!gestureState.active || event.pointerId !== gestureState.pointerId) {
+    return;
+  }
+
+  if (gestureState.dragStarted) {
+    return;
+  }
+
+  const dx = event.clientX - gestureState.startX;
+  const dy = event.clientY - gestureState.startY;
+  const moved = dx * dx + dy * dy;
+  if (moved >= DRAG_START_PIXELS * DRAG_START_PIXELS) {
+    if (gestureState.picked?.obj?.isSelected) {
+      gestureState.dragStarted = true;
+      return;
+    }
+    gestureState.dragStarted = true;
+    startDraggingFromPicked(gestureState.picked, event);
+  }
 }
 
 function onViewportPointerUp(event) {
-  if (!dragState.active || event.pointerId !== dragState.pointerId) {
+  if (dragState.active && event.pointerId === dragState.pointerId) {
+    event.preventDefault();
+    finishDragging();
+    resetGesture();
     return;
   }
+
+  if (!gestureState.active || event.pointerId !== gestureState.pointerId) {
+    return;
+  }
+
   event.preventDefault();
-  finishDragging();
+  if (!gestureState.dragStarted && gestureState.picked?.obj) {
+    toggleSelectedState(gestureState.picked.obj);
+  }
+
+  if (viewport.hasPointerCapture(event.pointerId)) {
+    viewport.releasePointerCapture(event.pointerId);
+  }
+  resetGesture();
+}
+
+function onViewportPointerCancel(event) {
+  if (dragState.active && event.pointerId === dragState.pointerId) {
+    finishDragging();
+  }
+
+  if (gestureState.active && event.pointerId === gestureState.pointerId) {
+    if (viewport.hasPointerCapture(event.pointerId)) {
+      viewport.releasePointerCapture(event.pointerId);
+    }
+    resetGesture();
+  }
 }
 
 function onViewportContextMenu(event) {
@@ -987,6 +1186,23 @@ function onViewportContextMenu(event) {
   }
 
   exchangeCashObject(picked.obj);
+}
+
+function onPayButtonClick() {
+  const payAmount = getSelectedTotalAmount();
+  if (payAmount <= 0) {
+    return;
+  }
+
+  const current = Number(amountInput.value);
+  const base = Number.isFinite(current) ? Math.max(0, Math.floor(current)) : 0;
+  const next = Math.max(0, base - payAmount);
+  amountInput.value = String(next);
+
+  const targets = selectedObjects.slice();
+  for (const obj of targets) {
+    removeCashObject(obj);
+  }
 }
 
 function isBodySettled(body) {
@@ -1023,13 +1239,15 @@ function resize() {
 }
 
 visualizeForm.addEventListener("submit", queueFromAmount);
+payButton.addEventListener("click", onPayButtonClick);
 viewport.addEventListener("pointerdown", onViewportPointerDown);
 viewport.addEventListener("pointermove", onViewportPointerMove);
 viewport.addEventListener("pointerup", onViewportPointerUp);
-viewport.addEventListener("pointercancel", onViewportPointerUp);
+viewport.addEventListener("pointercancel", onViewportPointerCancel);
 viewport.addEventListener("contextmenu", onViewportContextMenu);
 window.addEventListener("resize", resize);
 resize();
+updateSelectedTotalOverlay();
 
 const clock = new THREE.Clock();
 

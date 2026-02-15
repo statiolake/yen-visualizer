@@ -23,7 +23,7 @@
         <input
           id="amountInput"
           type="number"
-          min="1"
+          min="0"
           step="1"
           value="50000"
           inputmode="numeric"
@@ -32,6 +32,11 @@
         />
         <button id="dropButton" type="submit">リセット</button>
       </form>
+
+      <div id="selectedTotalOverlay" class="selected-total" aria-live="polite">
+        <span id="selectedTotalValue"></span>
+        <button id="payButton" type="button">支払う</button>
+      </div>
     </main>
 
     <script type="module" src="./app.js"></script>
